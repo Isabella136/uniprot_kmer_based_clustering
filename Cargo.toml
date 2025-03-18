@@ -1,0 +1,9 @@
+[package]
+name = "uniprot_nearest_neighbor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+boomphf = "0.6.0"
+rand = "0.9.0"
+seq_io = "0.3.3"
