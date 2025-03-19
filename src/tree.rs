@@ -31,6 +31,15 @@ fn at_least_one_true(bit_array: Arc<Vec<bool>>) -> bool {
     }
     false
 }
+fn calculate_similarity(bit_array: Arc<Vec<bool>>) -> u32 {
+    let mut number_true = 0u32;
+    for bit in bit_array.iter() {
+        if *bit {
+            number_true += 1;
+        }
+    }
+    number_true
+}
 
 #[derive(Clone)]
 struct Node {
@@ -64,12 +73,12 @@ impl Node {
         }
     }
 
-    // fn new_node_with_children(children: Vec<Arc<RwLock<Node>>>) -> Node {
-    //     let array_of_bit_arrays: Vec<Arc<Vec<bool>>> = children.iter()
-    //         .map(|x| x.read().unwrap().bit_array.clone()).collect();
-    //     let bit_array = binary_or_bit_array(array_of_bit_arrays);
-    //     Node{children, bit_array, protein: None}
-    // }
+    fn new_node_with_children(children: Vec<Arc<RwLock<Node>>>) -> Node {
+        let array_of_bit_arrays: Vec<Arc<Vec<bool>>> = children.iter()
+            .map(|x| x.read().unwrap().bit_array.clone()).collect();
+        let bit_array = binary_or_bit_array(array_of_bit_arrays);
+        Node{children, bit_array, protein: None}
+    }
 
     fn clone_and_clean(&mut self) -> Node {
         let mut children_copy: Vec<Arc<RwLock<Node>>> = vec![];
@@ -82,6 +91,49 @@ impl Node {
         self.protein = None;
         Node {children: children_copy, bit_array: bit_array_copy, protein: protein_copy}
         
+    }
+    fn balance(&mut self) {
+        if self.children.len() > 2 {
+            let mut max_similarity = (0u32, 0usize, 0usize);
+            for i in 1..self.children.len() {
+                for j in 0..i {
+                    let similarity_bit_array = binary_and_bit_array(
+                        self.children[i].read().unwrap().bit_array.clone(),
+                        self.children[j].read().unwrap().bit_array.clone());
+                    let similarity = calculate_similarity(similarity_bit_array);
+                    if similarity > max_similarity.0 {
+                        max_similarity = (similarity, i, j);
+                    }
+                }
+            }
+            if max_similarity.0 == 0 {
+                let len = self.children.len();
+                let first = {
+                    if len/2 == 1 {
+                        self.children[0].clone()
+                    }
+                    else {
+                        Arc::new(RwLock::new(
+                            Node::new_node_with_children(self.children[..len/2].to_vec())))
+                    }
+                };
+                let second = Arc::new(RwLock::new(
+                    Node::new_node_with_children(self.children[len/2..].to_vec())));
+                self.children = vec![first, second];    
+            }
+            else {
+                let combined = Arc::new(RwLock::new(
+                    Node::new_node_with_children(vec![
+                        self.children[max_similarity.1].clone(), 
+                        self.children[max_similarity.2].clone()])));
+                if max_similarity.1 <= max_similarity.2 {
+                    panic!("How")
+                }
+                self.children.remove(max_similarity.1);
+                self.children.remove(max_similarity.2);
+                self.children.push(combined);
+            }
+        }
     }
     fn add_child(mut curr: RwLockWriteGuard<'_, Node>, child: Arc<RwLock<Node>>) {
         // If curr is a leaf: 
@@ -155,6 +207,9 @@ impl Node {
                     curr.bit_array = binary_or_bit_array(vec![
                         child_read_locked.bit_array.clone(), curr.bit_array.clone()]);
                     curr.children.push(child.clone());
+                    if curr.children.len() >= 5 {
+                        curr.balance();
+                    }
                 }
                 // If only one node has kmers in common with child:
                 //      Update curr's bit array
@@ -207,6 +262,9 @@ impl Node {
                 curr.bit_array = binary_or_bit_array(vec![
                     child_read_locked.bit_array.clone(), curr.bit_array.clone()]);
                 curr.children.push(child.clone());
+                if curr.children.len() >= 5 {
+                    curr.balance();
+                }
             }
         }
         // let array_of_bit_arrays
