@@ -1,14 +1,16 @@
 use seq_io::parallel::parallel_fasta;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use seq_io::fasta::Reader;
 use std::thread;
 use boomphf::*;
+use std::time;
 use std::env;
 
 mod protein;
 mod tree;
 
 use crate::protein::Protein;
+use crate::tree::Tree;
 
 type FiveMer = u32;
 type SevenMer = u32;
@@ -69,10 +71,10 @@ fn main() {
 
     // We'll try to combine all 5-mers and all 7-mers
     for _ in 0..threads {
-        let protein_list = Arc::clone(&protein_list);
-        let five_mer_list = Arc::clone(&five_mer_list);
-        let seven_mer_list = Arc::clone(&seven_mer_list);
-        let next_protein_index = Arc::clone(&next_protein_index);
+        let protein_list = protein_list.clone();
+        let five_mer_list = five_mer_list.clone();
+        let seven_mer_list = seven_mer_list.clone();
+        let next_protein_index = next_protein_index.clone();
         handles.push(thread::spawn(move || {
             loop {
                 let curr_protein_index = {
@@ -143,15 +145,15 @@ fn main() {
     // We can now populate hash maps for each protein
     let mut handles = vec![];
     let next_protein_index = Arc::new(Mutex::new(0usize));
-    let protein_list: Arc<Vec<Mutex<Protein>>> = Arc::new((*protein_list).iter()
-        .map(|x| Mutex::new(x.clone())).collect());
+    let protein_list: Arc<Vec<Arc<RwLock<Protein>>>> = Arc::new((*protein_list).iter()
+        .map(|x| Arc::new(RwLock::new(x.clone()))).collect());
     for _ in 0..threads {
-        let five_phf = Arc::clone(&five_phf);
-        let seven_phf = Arc::clone(&seven_phf);
-        let five_mer_list_len = Arc::clone(&five_mer_list_len);
-        let seven_mer_list_len = Arc::clone(&seven_mer_list_len);
-        let protein_list = Arc::clone(&protein_list);
-        let next_protein_index = Arc::clone(&next_protein_index);
+        let five_phf = five_phf.clone();
+        let seven_phf = seven_phf.clone();
+        let five_mer_list_len = five_mer_list_len.clone();
+        let seven_mer_list_len = seven_mer_list_len.clone();
+        let protein_list = protein_list.clone();
+        let next_protein_index = next_protein_index.clone();
 
         handles.push(thread::spawn(move || {
             loop {
@@ -165,7 +167,7 @@ fn main() {
                     break;
                 }
                 let curr_protein = &mut protein_list[curr_protein_index]
-                    .lock().unwrap();
+                    .write().unwrap();
                 curr_protein.modify_hash_five_mer(&five_mer_list_len, &five_phf);
                 curr_protein.modify_hash_seven_mer(&seven_mer_list_len, &seven_phf);
                 
@@ -175,6 +177,38 @@ fn main() {
     for handle in handles {
         handle.join().unwrap();
     }
+
+    let next_protein_index = Arc::new(Mutex::new(1usize));
+    let tree = Arc::new(Tree::new(5u8, protein_list[0].clone()));
+    let mut handles = vec![];
+    for _ in 0..threads {
+        let tree = tree.clone();
+        let protein_list = protein_list.clone();
+        let next_protein_index = next_protein_index.clone();
+
+        handles.push(thread::spawn(move || {
+            loop {
+                let now = time::Instant::now();
+                let curr_protein_index = {
+                    let mut next_protein_index = next_protein_index.lock().unwrap();
+                    let curr_protein_index = *next_protein_index;
+                    *next_protein_index += 1;
+                    curr_protein_index
+                };
+                if curr_protein_index >= 10619 {
+                    break;
+                }
+                let curr_protein = protein_list[curr_protein_index].clone();
+                tree.add_protein(curr_protein);
+                println!("Current protein: {curr_protein_index}; took {} seconds", now.elapsed().as_secs());
+            }
+        }))
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    //print!("{tree:#?}")
 
     // Goal is to take all sequence and find all top ten 5-mers
     // Use those 5-mers to come up with a minimal perfect hash

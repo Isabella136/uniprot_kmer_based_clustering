@@ -1,16 +1,17 @@
 use seq_io::fasta::{Record, RefRecord};
 use rand::seq::index::sample;
 use boomphf::*;
+use std::fmt;
 
 type BitwiseAminoAcid = u8;
 type FiveMer = u32;
 type SevenMer = u32;
 
-const AMINO_ACID_LIST: [char; 20] = [
+const AMINO_ACID_LIST: [char; 21] = [
     'C', 'S', 'T', 'A', 'G',
     'P', 'D', 'E', 'Q', 'N',
     'H', 'R', 'K', 'M', 'I', 
-    'L', 'V', 'W', 'Y', 'F'];
+    'L', 'V', 'W', 'Y', 'F', '*'];
 
 fn bitwise_power(mut a: u32, mut n: u32) -> u32 {
     let mut ans: u32 = 1;
@@ -35,6 +36,17 @@ fn create_five_mer(amino_acids: [BitwiseAminoAcid; 5]) -> FiveMer {
     }
     five_mer
 }
+fn five_mer_back_to_amino_acid(five_mer: FiveMer) -> String {
+    let powers_of_twenty_one = [
+        1, 21, 21*21, bitwise_power(21, 3), bitwise_power(21, 4)];
+    let mut amino_acids = String::new();
+    let mut five_mer_clone = five_mer.clone();
+    for i in 0..5 {
+        amino_acids.push(AMINO_ACID_LIST[(five_mer_clone / powers_of_twenty_one[4-i]) as usize]);
+        five_mer_clone %= powers_of_twenty_one[4-i];
+    }
+    amino_acids
+}
 fn create_seven_mer(amino_acids: [BitwiseAminoAcid; 7]) -> SevenMer {
     let powers_of_twenty_one = [
         1, 21, 21*21, bitwise_power(21, 3), bitwise_power(21, 4),
@@ -55,13 +67,22 @@ fn amino_acid_to_bits(amino_acid: &char) -> BitwiseAminoAcid {
 
 #[derive(Default)]
 #[derive(Clone)]
-#[derive(Debug)]
 pub struct Protein {
     id: String,
     rand_five_mers: Vec<FiveMer>,
     rand_seven_mers: Vec<SevenMer>,
     hash_five_mers: Vec<bool>,
     hash_seven_mers: Vec<bool>,
+}
+impl fmt::Debug for Protein {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let five_mers: Vec<String> =  self.rand_five_mers.iter()
+                .map(|x| five_mer_back_to_amino_acid(*x)).collect();
+        f.debug_struct("Protein")
+            .field("id", &self.id)
+            .field("5-mers", &five_mers)
+            .finish()
+    }
 }
 impl Protein {
     pub fn new_protein(record: &RefRecord) -> Protein {
