@@ -144,12 +144,14 @@ fn main() {
 
     // We can now populate hash maps for each protein
     let mut handles = vec![];
+    let five_mer_freq = Arc::new(Mutex::new(vec![0usize; *five_mer_list_len]));
     let next_protein_index = Arc::new(Mutex::new(0usize));
     let protein_list: Arc<Vec<Arc<RwLock<Protein>>>> = Arc::new((*protein_list).iter()
         .map(|x| Arc::new(RwLock::new(x.clone()))).collect());
     for _ in 0..threads {
         let five_phf = five_phf.clone();
         let seven_phf = seven_phf.clone();
+        let five_mer_freq = five_mer_freq.clone();
         let five_mer_list_len = five_mer_list_len.clone();
         let seven_mer_list_len = seven_mer_list_len.clone();
         let protein_list = protein_list.clone();
@@ -170,45 +172,68 @@ fn main() {
                     .write().unwrap();
                 curr_protein.modify_hash_five_mer(&five_mer_list_len, &five_phf);
                 curr_protein.modify_hash_seven_mer(&seven_mer_list_len, &seven_phf);
-                
+
+                let five_mers = curr_protein.get_five_mers();
+                let mut five_mer_freq = five_mer_freq.lock().unwrap();
+                for five_mer in five_mers {
+                    (*five_mer_freq)[five_phf.hash(&five_mer) as usize] += 1;
+                }
             }
         }))
     }
     for handle in handles {
         handle.join().unwrap();
     }
+
+    let five_mer_freq = Arc::into_inner(five_mer_freq).unwrap().into_inner().unwrap();
+    let five_mer_freq_enum: Vec<(usize, &usize)> = five_mer_freq.iter().enumerate().collect();
+    let max_five_mer = five_mer_freq_enum.iter().max_by(
+        |x, y| x.1.cmp(y.1)).unwrap();
+    eprintln!("{max_five_mer:#?}");
 
     let next_protein_index = Arc::new(Mutex::new(1usize));
+    let protein_list: Arc<Vec<Arc<Protein>>> = Arc::new({
+        let mut temp_list = vec![];
+        let mut protein_list = protein_list;
+        let protein_list = Arc::get_mut(&mut protein_list).unwrap();
+        while protein_list.len() > 0 {
+            let protein = Arc::into_inner(protein_list.remove(0)).unwrap();
+            temp_list.push(Arc::new(protein.into_inner().unwrap()));
+        }
+        temp_list});
     let tree = Arc::new(Tree::new(5u8, protein_list[0].clone()));
-    let mut handles = vec![];
-    for _ in 0..threads {
-        let tree = tree.clone();
-        let protein_list = protein_list.clone();
-        let next_protein_index = next_protein_index.clone();
+    // let mut handles = vec![];
+    // let now = time::Instant::now();
 
-        handles.push(thread::spawn(move || {
-            loop {
-                let now = time::Instant::now();
-                let curr_protein_index = {
-                    let mut next_protein_index = next_protein_index.lock().unwrap();
-                    let curr_protein_index = *next_protein_index;
-                    *next_protein_index += 1;
-                    curr_protein_index
-                };
-                if curr_protein_index >= 10619 {
-                    break;
-                }
-                let curr_protein = protein_list[curr_protein_index].clone();
-                tree.add_protein(curr_protein);
-                println!("Current protein: {curr_protein_index}; took {} seconds", now.elapsed().as_secs());
-            }
-        }))
-    }
-    for handle in handles {
-        handle.join().unwrap();
-    }
+    // for i in 0..threads {
+    //     let tree = tree.clone();
+    //     let protein_list = protein_list.clone();
+    //     let next_protein_index = next_protein_index.clone();
 
-    //print!("{tree:#?}")
+    //     handles.push(thread::spawn(move || {
+    //         loop {
+    //             let curr_protein_index = {
+    //                 let mut next_protein_index = next_protein_index.lock().unwrap();
+    //                 let curr_protein_index = *next_protein_index;
+    //                 *next_protein_index += 1;
+    //                 curr_protein_index
+    //             };
+    //             if curr_protein_index >= 10619 {
+    //                 //println!("Done");
+    //                 break;
+    //             }
+    //             let curr_protein = protein_list[curr_protein_index].clone();
+    //             tree.add_protein(curr_protein);
+    //             eprintln!("Thread {i} - Current Protein: {curr_protein_index}");
+    //         }
+    //     }))
+    // }
+    // for handle in handles {
+    //     handle.join().unwrap();
+    // }
+    // println!("Tree building took {} seconds", now.elapsed().as_secs());
+
+    // print!("{tree:#?}");
 
     // Goal is to take all sequence and find all top ten 5-mers
     // Use those 5-mers to come up with a minimal perfect hash
