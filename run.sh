@@ -6,10 +6,10 @@
 #SBATCH --time=12:00:00
 #SBATCH --qos=huge-long
 #SBATCH --nodes=1
-#SBATCH --ntasks=32
+#SBATCH --ntasks=16
 #SBATCH --nodelist=cbcb16
 #SBATCH --mem=256gb
 #SBATCH --partition=cbcb
 #SBATCH --account=cbcb
 
-cargo run -- uniprot_arg.fasta 32
+cargo run -- uniprot_arg.fasta 16

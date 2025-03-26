@@ -71,8 +71,10 @@ pub struct Protein {
     id: String,
     rand_five_mers: Vec<FiveMer>,
     rand_seven_mers: Vec<SevenMer>,
-    hash_five_mers: Vec<bool>,
-    hash_seven_mers: Vec<bool>,
+    hash_five_mers: Vec<u32>,
+    hash_seven_mers: Vec<u32>,
+    hashmap_five_mers: Vec<bool>,
+    hashmap_seven_mers: Vec<bool>,
 }
 impl fmt::Debug for Protein {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -112,14 +114,18 @@ impl Protein {
                 }
                 create_seven_mer(amino_acids)
             }).collect();
-        let hash_five_mers: Vec<bool> = vec![];
-        let hash_seven_mers: Vec<bool> = vec![];
+        let hash_five_mers: Vec<u32> = vec![];
+        let hash_seven_mers: Vec<u32> = vec![];
+        let hashmap_five_mers: Vec<bool> = vec![];
+        let hashmap_seven_mers: Vec<bool> = vec![];
         Protein {
             id,
             rand_five_mers,
             rand_seven_mers,
             hash_five_mers,
             hash_seven_mers,
+            hashmap_five_mers,
+            hashmap_seven_mers,
         }
     }
     pub fn get_five_mers(&self) -> Vec<FiveMer> {
@@ -128,24 +134,34 @@ impl Protein {
     pub fn get_seven_mers(&self) -> Vec<SevenMer> {
         return self.rand_seven_mers.clone();
     }
-    pub fn get_five_hash(&self) -> Vec<bool> {
+    pub fn get_five_hash_map(&self) -> Vec<bool> {
+        return self.hashmap_five_mers.clone();
+    }
+    pub fn get_five_hash(&self) -> Vec<u32> {
         return self.hash_five_mers.clone();
     }
-    pub fn get_seven_hash(&self) -> Vec<bool> {
+    pub fn get_seven_hash_map(&self) -> Vec<bool> {
+        return self.hashmap_seven_mers.clone();
+    }
+    pub fn get_seven_hash(&self) -> Vec<u32> {
         return self.hash_seven_mers.clone();
     }
     pub fn modify_hash_five_mer(&mut self, len: &usize, phf: &Mphf<u32>) {
         let mut hash_map = vec![false; *len];
         for five_mer in &self.rand_five_mers {
-            hash_map[phf.hash(five_mer) as usize] = true;
+            let curr_hash = phf.hash(five_mer) as usize;
+            hash_map[curr_hash] = true;
+            self.hash_five_mers.push(curr_hash as u32);
         }
-        self.hash_five_mers = hash_map;
+        self.hashmap_five_mers = hash_map;
     }
     pub fn modify_hash_seven_mer(&mut self, len: &usize, phf: &Mphf<u32>) {
         let mut hash_map = vec![false; *len];
         for seven_mer in &self.rand_seven_mers {
-            hash_map[phf.hash(seven_mer) as usize] = true;
+            let curr_hash = phf.hash(seven_mer) as usize;
+            hash_map[curr_hash] = true;
+            self.hash_seven_mers.push(curr_hash as u32);
         }
-        self.hash_seven_mers = hash_map;
+        self.hashmap_seven_mers = hash_map;
     }
 }
