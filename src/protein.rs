@@ -1,5 +1,4 @@
 use seq_io::fasta::{Record, RefRecord};
-use rand::seq::index::sample;
 use boomphf::*;
 use std::fmt;
 
@@ -69,8 +68,8 @@ fn amino_acid_to_bits(amino_acid: &char) -> BitwiseAminoAcid {
 #[derive(Clone)]
 pub struct Protein {
     id: String,
-    rand_five_mers: Vec<FiveMer>,
-    rand_seven_mers: Vec<SevenMer>,
+    five_mers: Vec<FiveMer>,
+    seven_mers: Vec<SevenMer>,
     hash_five_mers: Vec<u32>,
     hash_seven_mers: Vec<u32>,
     hashmap_five_mers: Vec<bool>,
@@ -78,7 +77,7 @@ pub struct Protein {
 }
 impl fmt::Debug for Protein {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let five_mers: Vec<String> =  self.rand_five_mers.iter()
+        let five_mers: Vec<String> =  self.five_mers.iter()
                 .map(|x| five_mer_back_to_amino_acid(*x)).collect();
         f.debug_struct("Protein")
             .field("id", &self.id)
@@ -88,15 +87,12 @@ impl fmt::Debug for Protein {
 }
 impl Protein {
     pub fn new_protein(record: &RefRecord) -> Protein {
-        let mut rng = rand::rng();
         let id = record.id().unwrap().to_string();
         let seq = record.seq();
         let seq_len = seq.len();
-        let rand_five_mer_indices = sample(
-            &mut rng, seq_len-4, (seq_len-4)/10).into_vec();
-        let rand_seven_mer_indices = sample(
-            &mut rng, seq_len-6, (seq_len-6)/10).into_vec();
-        let rand_five_mers: Vec<FiveMer> = rand_five_mer_indices.iter().map(
+        let five_mer_indices: Vec<usize> = (0..seq_len-4).collect();
+        let seven_mer_indices: Vec<usize> = (0..seq_len-6).collect();
+        let five_mers: Vec<FiveMer> = five_mer_indices.iter().map(
             |start| {
                 let end = start + 5;
                 let mut amino_acids = [0u8; 5];
@@ -105,7 +101,7 @@ impl Protein {
                 }
                 create_five_mer(amino_acids)
             }).collect();
-        let rand_seven_mers: Vec<SevenMer> = rand_seven_mer_indices.iter().map(
+        let seven_mers: Vec<SevenMer> = seven_mer_indices.iter().map(
             |start| {
                 let end = start + 7;
                 let mut amino_acids = [0u8; 7];
@@ -120,8 +116,8 @@ impl Protein {
         let hashmap_seven_mers: Vec<bool> = vec![];
         Protein {
             id,
-            rand_five_mers,
-            rand_seven_mers,
+            five_mers,
+            seven_mers,
             hash_five_mers,
             hash_seven_mers,
             hashmap_five_mers,
@@ -129,10 +125,10 @@ impl Protein {
         }
     }
     pub fn get_five_mers(&self) -> Vec<FiveMer> {
-        return self.rand_five_mers.clone();
+        return self.five_mers.clone();
     }
     pub fn get_seven_mers(&self) -> Vec<SevenMer> {
-        return self.rand_seven_mers.clone();
+        return self.seven_mers.clone();
     }
     pub fn get_five_hash_map(&self) -> Vec<bool> {
         return self.hashmap_five_mers.clone();
@@ -146,9 +142,33 @@ impl Protein {
     pub fn get_seven_hash(&self) -> Vec<u32> {
         return self.hash_seven_mers.clone();
     }
+    pub fn remove_unique_five_mers(&mut self, phf: &Mphf<u32>, unique_kmers: &Vec<bool>) {
+        let mut index = 0usize;
+        while index < self.five_mers.len() {
+            while unique_kmers[phf.hash(&self.five_mers[index]) as usize] {
+                self.five_mers.remove(index);
+                if index == self.five_mers.len() {
+                    break;
+                }
+            }
+            index += 1;
+        }
+    }
+    pub fn remove_unique_seven_mers(&mut self, phf: &Mphf<u32>, unique_kmers: &Vec<bool>) {
+        let mut index = 0usize;
+        while index < self.seven_mers.len() {
+            while unique_kmers[phf.hash(&self.seven_mers[index]) as usize] {
+                self.seven_mers.remove(index);
+                if index == self.seven_mers.len() {
+                    break;
+                }
+            }
+            index += 1;
+        }
+    }
     pub fn modify_hash_five_mer(&mut self, len: &usize, phf: &Mphf<u32>) {
         let mut hash_map = vec![false; *len];
-        for five_mer in &self.rand_five_mers {
+        for five_mer in &self.five_mers {
             let curr_hash = phf.hash(five_mer) as usize;
             hash_map[curr_hash] = true;
             self.hash_five_mers.push(curr_hash as u32);
@@ -157,7 +177,7 @@ impl Protein {
     }
     pub fn modify_hash_seven_mer(&mut self, len: &usize, phf: &Mphf<u32>) {
         let mut hash_map = vec![false; *len];
-        for seven_mer in &self.rand_seven_mers {
+        for seven_mer in &self.seven_mers {
             let curr_hash = phf.hash(seven_mer) as usize;
             hash_map[curr_hash] = true;
             self.hash_seven_mers.push(curr_hash as u32);
