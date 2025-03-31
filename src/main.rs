@@ -1,3 +1,5 @@
+#![feature(get_mut_unchecked)]
+
 use seq_io::parallel::parallel_fasta;
 use std::sync::{Arc, Mutex, RwLock};
 use seq_io::fasta::Reader;
@@ -8,9 +10,11 @@ use std::time;
 use std::env;
 
 mod protein;
+mod graph;
 mod tree;
 
 use crate::protein::Protein;
+use crate::graph::Graph;
 use crate::tree::Tree;
 
 type FiveMer = u32;
@@ -257,8 +261,7 @@ fn main() {
         |x, y| x.1.cmp(y.1)).unwrap();
     eprintln!("{max_five_mer:#?}");
 
-
-    let next_protein_index = Arc::new(Mutex::new(1usize));
+    
     let protein_list: Arc<Vec<Arc<Protein>>> = Arc::new({
         let mut temp_list = vec![];
         let mut protein_list = protein_list;
@@ -268,6 +271,11 @@ fn main() {
             temp_list.push(Arc::new(protein.into_inner().unwrap()));
         }
         temp_list});
+    let graph = Graph::new(five_mer_hash_freq.len() as u32, threads, protein_list.clone());
+    println!("{graph:#?}");
+    
+    std::process::exit(0);
+    let next_protein_index = Arc::new(Mutex::new(1usize));
     let tree = Arc::new(Tree::new(5u8, protein_list[0].clone()));
     let mut handles = vec![];
     let now = time::Instant::now();

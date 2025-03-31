@@ -33,7 +33,7 @@ fn intersect_bitarrays(
     
     let mut bit_array_indices_vec_index = 0usize;
     while bit_array_indices_vec_index < bit_array_indices.len() {
-        while !bit_array[bit_array_indices_vec_index] {
+        while !bit_array[bit_array_indices[bit_array_indices_vec_index] as usize] {
             bit_array_indices.remove(bit_array_indices_vec_index);
             if bit_array_indices_vec_index == bit_array_indices.len() {
                 break;
@@ -74,6 +74,11 @@ impl Node {
             protein: Some(protein.clone()),
         };
         node.add_bit_array_from_protein(protein, kmer_size);
+        // eprintln!("Node u_bitarray: {:#?}; c_bitarray: {:#?}; u_bitarray_indices: {:#?}; c_bitarray_indices: {:#?}",
+        //     node.u_bitarray,
+        //     node.c_bitarray,
+        //     node.u_bitarray_indices,
+        //     node.c_bitarray_indices);
         node
     }
 
@@ -212,6 +217,7 @@ impl Node {
         }
         
         if max_c_similarity.0 > min_c_similarity.unwrap() {
+            eprintln!("Merging");
             if max_c_similarity.1 <= max_c_similarity.2 {
                 panic!("How")
             }
@@ -232,6 +238,9 @@ impl Node {
                 Node::add_child(combined_lock, child_one);
             }
         }
+        // else {
+        //     eprintln!("No merging");
+        // }
         // else if max_u_similarity.0 > min_u_similarity.unwrap() && curr.children.len() > 100 {
         //     if max_u_similarity.1 <= max_u_similarity.2 {
         //         panic!("How")
@@ -265,6 +274,12 @@ impl Node {
             let child_read_lock = child.read().unwrap();
             let cloned = Arc::new(RwLock::new(curr.clone_and_clean()));
             let cloned_read_lock = cloned.read().unwrap();
+
+            // eprintln!("Clone u_bitarray: {:#?}; c_bitarray: {:#?}; u_bitarray_indices: {:#?}; c_bitarray_indices: {:#?}",
+            //     cloned_read_lock.u_bitarray,
+            //     cloned_read_lock.c_bitarray,
+            //     cloned_read_lock.u_bitarray_indices,
+            //     cloned_read_lock.c_bitarray_indices);
 
             let array_of_u_bitarray_indices = vec![child_read_lock
                 .u_bitarray_indices.clone()];
@@ -317,6 +332,12 @@ impl Node {
                     curr_u_bitarray, curr_u_bitarray_indices,
                     vec![child_read_lock.u_bitarray.clone()]);
 
+            // eprintln!("Curr u_bitarray: {:#?}; u_bitarray_indices: {:#?}. \n Child: u_bitarray_indices: {:#?}. \n Intersect: {:#?}",
+            //     curr.u_bitarray,
+            //     curr.u_bitarray_indices,
+            //     child_read_lock.u_bitarray_indices,
+            //     intersect);
+
             // If curr's proteins and child have no kmer in common:
             //      Have curr adopt child
             //      Balance curr if needed
@@ -357,6 +378,9 @@ impl Node {
             //println!("Newly added protein has no kmer in common with current node");
             if !intersect.is_empty() {
                 Node::balance(curr);
+            }
+            else {
+                eprintln!("No kmers in common");
             }
             }
             // else {

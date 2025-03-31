@@ -1,4 +1,5 @@
 use seq_io::fasta::{Record, RefRecord};
+// use rand::seq::index::sample;
 use boomphf::*;
 use std::fmt;
 
@@ -87,11 +88,16 @@ impl fmt::Debug for Protein {
 }
 impl Protein {
     pub fn new_protein(record: &RefRecord) -> Protein {
+        // let mut rng = rand::rng();
         let id = record.id().unwrap().to_string();
         let seq = record.seq();
         let seq_len = seq.len();
         let five_mer_indices: Vec<usize> = (0..seq_len-4).collect();
+        // let five_mer_indices: Vec<usize> = sample(
+        //     &mut rng, seq_len-4, (seq_len-4)/10).into_vec();
         let seven_mer_indices: Vec<usize> = (0..seq_len-6).collect();
+        // let seven_mer_indices: Vec<usize> = sample(
+        //     &mut rng, seq_len-6, (seq_len-6)/4).into_vec();
         let five_mers: Vec<FiveMer> = five_mer_indices.iter().map(
             |start| {
                 let end = start + 5;
@@ -135,6 +141,9 @@ impl Protein {
     }
     pub fn get_five_hash(&self) -> Vec<u32> {
         return self.hash_five_mers.clone();
+    }
+    pub fn get_five_hash_ref(&self) -> &Vec<u32> {
+        return &self.hash_five_mers;
     }
     pub fn get_seven_hash_map(&self) -> Vec<bool> {
         return self.hashmap_seven_mers.clone();
