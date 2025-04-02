@@ -165,8 +165,6 @@ fn main() {
         let curr_hash = five_mer_all_phf.hash(&five_mer) as usize;
         five_mer_unique_hashmap[curr_hash] = true;
     }
-    eprintln!("5-mers amount: {five_mer_all_len}; repeated: {five_mer_repeat_len}");
-
     drop(five_mer_repeat);
     drop(five_mer_freq_list);
 
@@ -191,7 +189,6 @@ fn main() {
         let curr_hash = seven_mer_all_phf.hash(&seven_mer) as usize;
         seven_mer_unique_hashmap[curr_hash] = true;
     }
-    eprintln!("7-mers amount: {seven_mer_all_len}; repeated: {seven_mer_repeat_len}");
     drop(seven_mer_repeat);
     drop(seven_mer_freq_list);
     
@@ -251,17 +248,10 @@ fn main() {
     for handle in handles {
         handle.join().unwrap();
     }
-
     drop(five_mer_all_phf);
     drop(seven_mer_all_phf);
 
     let five_mer_hash_freq = Arc::into_inner(five_mer_hash_freq).unwrap().into_inner().unwrap();
-    let five_mer_freq_enum: Vec<(usize, &usize)> = five_mer_hash_freq.iter().enumerate().collect();
-    let max_five_mer = five_mer_freq_enum.iter().max_by(
-        |x, y| x.1.cmp(y.1)).unwrap();
-    eprintln!("{max_five_mer:#?}");
-
-    
     let protein_list: Arc<Vec<Arc<Protein>>> = Arc::new({
         let mut temp_list = vec![];
         let mut protein_list = protein_list;
@@ -271,8 +261,18 @@ fn main() {
             temp_list.push(Arc::new(protein.into_inner().unwrap()));
         }
         temp_list});
-    let graph = Graph::new(five_mer_hash_freq.len() as u32, threads, protein_list.clone());
-    println!("{graph:#?}");
+    let graph = Graph::new(five_mer_hash_freq.len(), threads, protein_list.clone());
+    let mut prev_edge_amt = five_mer_hash_freq.len();
+    Graph::combine_edges(graph.clone(), threads);
+    let mut new_edge_amt  = graph.edges.len();
+    while prev_edge_amt != new_edge_amt {
+        Graph::combine_edges(graph.clone(), threads);
+        prev_edge_amt = new_edge_amt.clone();
+        new_edge_amt = graph.edges.len();
+    }
+    
+    println!("Graph after a few iterations:\n{graph:#?}");
+
     
     std::process::exit(0);
     let next_protein_index = Arc::new(Mutex::new(1usize));

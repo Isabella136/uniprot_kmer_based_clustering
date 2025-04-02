@@ -142,9 +142,6 @@ impl Protein {
     pub fn get_five_hash(&self) -> Vec<u32> {
         return self.hash_five_mers.clone();
     }
-    pub fn get_five_hash_ref(&self) -> &Vec<u32> {
-        return &self.hash_five_mers;
-    }
     pub fn get_seven_hash_map(&self) -> Vec<bool> {
         return self.hashmap_seven_mers.clone();
     }

@@ -20,17 +20,15 @@ type ReadGuard<'a, T> = RwLockReadGuard<'a, T>;
 
 struct KmerEdgeSingle {
     kmer: usize,
-    graph: ArcGraph,
     vertices_key: Vec<usize>,
     vertices_bit_array: Vec<bool>,
 }
 impl KmerEdgeSingle {
 
     // Make a new KmerEdge
-    fn new(graph: ArcGraph, kmer: usize, vertices_count: usize) -> KmerEdgeSingle {
+    fn new(kmer: usize, vertices_count: usize) -> KmerEdgeSingle {
         KmerEdgeSingle {
             kmer,
-            graph,
             vertices_key: vec![],
             vertices_bit_array: vec![false; vertices_count],
         }
@@ -66,8 +64,18 @@ impl KmerEdgeGroup {
             let kmer_edge = graph.edges[loaded_edge_key].read().unwrap();
 
             kmers.append(&mut kmer_edge.get_kmers());
-            vertices_key.append(&mut kmer_edge.get_vertices_key());
-            vertices_bit_array.append(&mut kmer_edge.get_vertices_bit_array());
+            if vertices_bit_array.is_empty() {
+                vertices_key.append(&mut kmer_edge.get_vertices_key());
+                vertices_bit_array.append(&mut kmer_edge.get_vertices_bit_array());
+            }
+            else {
+                for key in kmer_edge.get_vertices_key() {
+                    if !vertices_bit_array[key] {
+                        vertices_bit_array[key] = true;
+                        vertices_key.push(key);
+                    }
+                }
+            }
         }
 
         // Make KmerEdgeGroup object
@@ -94,23 +102,35 @@ impl KmerEdgeGroup {
         }
         removed_bit_array[new_key.load(Ordering::Acquire)] = false;
 
-        // Make ARC pointers of shared variables        
-        let vertices_key: Arc<&Vec<usize>> = Arc::new(&self.vertices_key);
+        // Make ARC pointers of shared variables 
+        let vertices_key: Arc<Vec<usize>> = Arc::new(self.vertices_key.clone()); 
+        let removed_bit_array: Arc<Vec<bool>> = Arc::new(removed_bit_array);
         let vertices_index: ArcUsize = Arc::new(AtomicUsize::new(0));
-        let old_keys: Arc<&Vec<ArcUsize>> = Arc::new(old_keys);
+        //let old_keys: Arc<&Vec<ArcUsize>> = Arc::new(old_keys);
         let mut handles = vec![];
 
         for _ in 0..thread_count {
-            let vertices_key: Arc<&Vec<usize>> = vertices_key.clone();
+            let removed_bit_array: Arc<Vec<bool>> = removed_bit_array.clone();
+            let vertices_key: Arc<Vec<usize>> = vertices_key.clone();
             let vertices_index: ArcUsize = vertices_index.clone();
-            let old_keys: Arc<&Vec<ArcUsize>> = old_keys.clone();
+            //let old_keys: Arc<&Vec<ArcUsize>> = old_keys.clone();
             let graph: ArcGraph = self.graph.clone();
+            let new_key: ArcUsize = new_key.clone();
             handles.push(spawn(move || {
                 loop {
-                    
+                    let curr_vertex_index = vertices_index.fetch_add(
+                        1, Ordering::AcqRel
+                    );
+                    if curr_vertex_index >= vertices_key.len() {
+                        break;
+                    }
+                    let curr_key = vertices_key[curr_vertex_index];
+                    let curr_vertex: ArcProteinVertex = graph.vertices[curr_key].clone();
+                    let mut curr_vertex = curr_vertex.write().unwrap();
+                    curr_vertex.remove_edges(removed_bit_array.clone());
+                    curr_vertex.add_edge(new_key.clone());
                 }
             }))
-
         }
         for handle in handles {
             handle.join().unwrap();
@@ -118,7 +138,7 @@ impl KmerEdgeGroup {
     }
 }
 
-enum KmerEdge {
+pub enum KmerEdge {
     Single(KmerEdgeSingle),
     Group(KmerEdgeGroup),
 }
@@ -129,37 +149,46 @@ impl KmerEdge {
             Self::Group(val) => val.kmers.clone(),
         }
     }
+
     fn get_vertices_key(&self) -> Vec<usize> {
         match self {
             Self::Single(val) => val.vertices_key.clone(),
             Self::Group(val) => val.vertices_key.clone(),
         }
     }
+
     fn get_vertices_bit_array(&self) -> Vec<bool> {
         match self {
             Self::Single(val) => val.vertices_bit_array.clone(),
             Self::Group(val) => val.vertices_bit_array.clone(),
         }
     }
-    fn get_graph(&self) -> ArcGraph {
-        match self {
-            Self::Single(val) => val.graph.clone(),
-            Self::Group(val) => val.graph.clone(),
-        }
-    }
+
     fn add_vertex(&mut self, vertex_key: usize) {
         match self {
             Self::Single(val) => val.add_vertex(vertex_key),
             Self::Group(val) => val.add_vertex(vertex_key),
         }
     }
-    fn new(graph: ArcGraph, kmer: usize, vertices_count: usize) -> KmerEdge {
-        Self::Single(KmerEdgeSingle::new(graph, kmer, vertices_count))
+
+    fn update_protein_vertices(&self,
+            old_keys: &Vec<ArcUsize>, new_key: ArcUsize, 
+            total_edges: usize, thread_count: u32) {
+        match self {
+            Self::Single(_) => panic!(
+                "Can't call update_protein_vertices on single kmer"),
+            Self::Group(val) => val.update_protein_vertices(
+                old_keys, new_key, total_edges, thread_count),
+        }
     }
-    // find the relative frequency of vertices in other that are also in self
+    fn new(kmer: usize, vertices_count: usize) -> KmerEdge {
+        Self::Single(KmerEdgeSingle::new(kmer, vertices_count))
+    }
+    
     fn merge(kmer_edge_keys: &Vec<ArcUsize>, graph: ArcGraph) -> KmerEdge {
         Self::Group(KmerEdgeGroup::new(kmer_edge_keys, graph))
     }
+    // find the relative frequency of vertices in other that are also in self
     fn compare(&self, other: &Self) -> f64 {
         let self_bit_array = self.get_vertices_bit_array();
         let other_keys = other.get_vertices_key();
@@ -189,6 +218,28 @@ impl ProteinVertex {
         ProteinVertex{key, graph, edges_key}
     }
 
+    // Add key to KmerEdge
+    fn add_edge(&mut self, edge_key: ArcUsize) {
+        let length = self.graph.edges.len();
+        let edges_bit_array: Vec<bool> = self.get_edges_bit_array(length);
+        if !edges_bit_array[edge_key.load(Ordering::Acquire)] {
+            self.edges_key.push(edge_key);
+        }
+    }
+
+    // Remove keys to KmerEdge
+    fn remove_edges(&mut self, removed_bit_array: Arc<Vec<bool>>) {
+        let mut index = 0usize;
+        while index < self.edges_key.len() {
+            if removed_bit_array[self.edges_key[index].load(Ordering::Acquire)] {
+                self.edges_key.remove(index);
+            }
+            else {
+                index += 1;
+            }
+        }
+    }
+
     // Update ProteinVertex's edges to reflect ProteinVertex's presence
     fn update_graph_edges(&self) {
         for key in &self.edges_key {
@@ -209,7 +260,7 @@ impl ProteinVertex {
 }
 
 pub struct Graph {
-    edges: ArcVec<ArcKmerEdge>,
+    pub edges: ArcVec<ArcKmerEdge>,
     protein_list: ArcVec<ArcProtein>,
     vertices: ArcVec<ArcProteinVertex>,
     global_edge_keys: ArcVec<ArcUsize>,
@@ -235,7 +286,7 @@ impl Graph {
         let mut graph_arc: ArcGraph = Arc::new(graph);
         let edges: ArcVec<ArcKmerEdge> = Arc::new(
             (0..kmer_count).into_iter().map(|kmer: usize| Arc::new(RwLock::new(
-                KmerEdge::new(graph_arc.clone(), kmer.clone(), vertices_count))
+                KmerEdge::new(kmer.clone(), vertices_count))
             )).collect()
         );
         unsafe {Arc::get_mut_unchecked(&mut graph_arc).edges = edges};
@@ -292,7 +343,7 @@ impl Graph {
             let edge_b: ArcKmerEdge = graph.edges[key_b].clone();
             let edge_a_size: usize = edge_a.read().unwrap().get_vertices_key().len();
             let edge_b_size: usize = edge_b.read().unwrap().get_vertices_key().len();
-            edge_a_size.cmp(&edge_b_size)});
+            edge_b_size.cmp(&edge_a_size)});
         
         // Traverse through each edge
         for edge_key in ordered_edge_keys {
@@ -305,6 +356,8 @@ impl Graph {
             let unwraped_edge_key: ArcUsize = edge_key.as_ref().clone().unwrap();
             let loaded_edge_key: usize = unwraped_edge_key.load(Ordering::Acquire);
             let edge: ArcKmerEdge = graph.edges[loaded_edge_key].clone();
+            eprintln!("Currently at edge {loaded_edge_key} of size {}", 
+                edge.read().unwrap().get_vertices_key().len());
 
             // Make ARC pointers of shared variables   
             let vertices_index: ArcUsize = 
@@ -355,6 +408,7 @@ impl Graph {
             for handle in handles {
                 handle.join().unwrap();
             }
+            drop(first_vertex);
             drop(vertices_index);
             drop(other_edges_bitarray);
 
@@ -405,9 +459,6 @@ impl Graph {
                         if other_cmp_edge == 1.0 {
                             edges_to_merge_with.lock().unwrap().push(other_key.clone());
                         }
-                        else if edge_cmp_other == 1.0 {
-                            edges_to_merge_with.lock().unwrap().push(other_key.clone());
-                        }
                         else if edge_cmp_other >= 0.8 && other_cmp_edge >= 0.8 {
                             edges_to_merge_with.lock().unwrap().push(other_key.clone());
                         }
@@ -430,6 +481,46 @@ impl Graph {
             // Merge edges into one
             let kmer_edge_group: KmerEdge = KmerEdge::merge(
                 edges_to_merge_with.deref(), graph.clone());
+            kmer_edge_group.update_protein_vertices(
+                edges_to_merge_with.deref(), unwraped_edge_key, 
+                graph.edges.len(), thread_count);
+            unsafe {
+                let mut write_lock = Arc::get_mut_unchecked(&mut graph)
+                    .edges[loaded_edge_key].write().unwrap();
+                *write_lock = kmer_edge_group;
+            }
+            for old_key in &*edges_to_merge_with {
+                let loaded = old_key.load(Ordering::Acquire);
+                if loaded != loaded_edge_key {
+                    unsafe {
+                        *Rc::get_mut_unchecked(&mut unordered_edge_keys[loaded]) = None;
+                    }
+                }
+            }
+        }
+        
+        let mut substractive = 0usize;
+        for (index, edge_key) in unordered_edge_keys.iter().enumerate() {
+            if edge_key.is_none() {
+                unsafe {
+                    let graph_mut = Arc::get_mut_unchecked(&mut graph);
+                    Arc::get_mut_unchecked(&mut graph_mut.edges)
+                        .remove(index - substractive);
+                    Arc::get_mut_unchecked(&mut graph_mut.global_edge_keys)
+                        .remove(index - substractive);
+                }
+                substractive += 1;
+            }
+            else if substractive > 0 {
+                unsafe {
+                    let graph_mut = Arc::get_mut_unchecked(&mut graph);
+                    let edge_keys = 
+                        Arc::get_mut_unchecked(&mut graph_mut.global_edge_keys);
+                    let edge_key = 
+                        Arc::get_mut_unchecked(&mut edge_keys[index-substractive]);
+                    edge_key.fetch_sub(substractive, Ordering::AcqRel);
+                }
+            }
         }
     }
 }
@@ -438,17 +529,33 @@ impl Graph {
 
 impl fmt::Debug for Graph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.edges.iter()).finish()
+        f.debug_struct("Graph")
+            .field("Kmers", &self.edges)
+            .field("Proteins", &self.vertices).finish()
+    }
+}
+impl fmt::Debug for ProteinVertex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let edge_amt = self.edges_key.len();
+        f.debug_struct("Protein")
+                .field("key", &self.key)
+                .field("size", &edge_amt).finish()
     }
 }
 impl fmt::Debug for KmerEdge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Single(val) => {
-                f.debug_list().entries(val.vertices_key.clone()).finish()
+                let vertices_amt = val.vertices_key.len();
+                f.debug_struct("Single Kmer")
+                    .field("kmer", &val.kmer)
+                    .field("size", &vertices_amt).finish()
             },
             Self::Group(val) => {
-                f.debug_list().entries(val.vertices_key.clone()).finish()
+                let vertices_amt = val.vertices_key.len();
+                f.debug_struct("Kmer Group")
+                    .field("kmer", &val.kmers)
+                    .field("size", &vertices_amt).finish()
             },
         }
     }
