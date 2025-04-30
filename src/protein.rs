@@ -136,18 +136,18 @@ impl Protein {
     pub fn get_seven_mers(&self) -> Vec<SevenMer> {
         return self.seven_mers.clone();
     }
-    pub fn get_five_hash_map(&self) -> Vec<bool> {
-        return self.hashmap_five_mers.clone();
-    }
+    // pub fn get_five_hash_map(&self) -> Vec<bool> {
+    //     return self.hashmap_five_mers.clone();
+    // }
     pub fn get_five_hash(&self) -> Vec<u32> {
         return self.hash_five_mers.clone();
     }
-    pub fn get_seven_hash_map(&self) -> Vec<bool> {
-        return self.hashmap_seven_mers.clone();
-    }
-    pub fn get_seven_hash(&self) -> Vec<u32> {
-        return self.hash_seven_mers.clone();
-    }
+    // pub fn get_seven_hash_map(&self) -> Vec<bool> {
+    //     return self.hashmap_seven_mers.clone();
+    // }
+    // pub fn get_seven_hash(&self) -> Vec<u32> {
+    //     return self.hash_seven_mers.clone();
+    // }
     pub fn remove_unique_five_mers(&mut self, phf: &Mphf<u32>, unique_kmers: &Vec<bool>) {
         let mut index = 0usize;
         while index < self.five_mers.len() {

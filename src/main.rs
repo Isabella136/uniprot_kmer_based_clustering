@@ -6,16 +6,14 @@ use seq_io::fasta::Reader;
 use std::ops::Deref;
 use std::thread;
 use boomphf::*;
-use std::time;
 use std::env;
 
 mod protein;
 mod graph;
-mod tree;
+// mod tree;
 
 use crate::protein::Protein;
 use crate::graph::Graph;
-use crate::tree::Tree;
 
 type FiveMer = u32;
 type SevenMer = u32;
@@ -274,49 +272,44 @@ fn main() {
     println!("Graph after a few iterations:\n{graph:#?}");
 
     
-    std::process::exit(0);
-    let next_protein_index = Arc::new(Mutex::new(1usize));
-    let tree = Arc::new(Tree::new(5u8, protein_list[0].clone()));
-    let mut handles = vec![];
-    let now = time::Instant::now();
+    // std::process::exit(0);
+    // let next_protein_index = Arc::new(Mutex::new(1usize));
+    // let tree = Arc::new(Tree::new(5u8, protein_list[0].clone()));
+    // let mut handles = vec![];
+    // let now = time::Instant::now();
 
-    for i in 0..threads {
-        let tree = tree.clone();
-        let protein_list = protein_list.clone();
-        let next_protein_index = next_protein_index.clone();
+    // for i in 0..threads {
+    //     let tree = tree.clone();
+    //     let protein_list = protein_list.clone();
+    //     let next_protein_index = next_protein_index.clone();
 
-        handles.push(thread::spawn(move || {
-            loop {
-                let now_local = time::Instant::now();
+    //     handles.push(thread::spawn(move || {
+    //         loop {
+    //             let now_local = time::Instant::now();
 
-                let curr_protein_index = {
-                    let mut next_protein_index = next_protein_index.lock().unwrap();
-                    let curr_protein_index = *next_protein_index;
-                    *next_protein_index += 1;
-                    curr_protein_index
-                };
-                if curr_protein_index >= 10619 {
-                    //println!("Done");
-                    break;
-                }
-                let curr_protein = protein_list[curr_protein_index].clone();
-                tree.add_protein(curr_protein);
+    //             let curr_protein_index = {
+    //                 let mut next_protein_index = next_protein_index.lock().unwrap();
+    //                 let curr_protein_index = *next_protein_index;
+    //                 *next_protein_index += 1;
+    //                 curr_protein_index
+    //             };
+    //             if curr_protein_index >= 10619 {
+    //                 //println!("Done");
+    //                 break;
+    //             }
+    //             let curr_protein = protein_list[curr_protein_index].clone();
+    //             tree.add_protein(curr_protein);
                 
-                eprintln!("Thread {i} - Current Protein: {curr_protein_index} - Time: {} secs", now_local.elapsed().as_secs());
-            }
-        }))
-    }
-    for handle in handles {
-        handle.join().unwrap();
-    }
-    println!("Tree building took {} seconds", now.elapsed().as_secs());
+    //             eprintln!("Thread {i} - Current Protein: {curr_protein_index} - Time: {} secs", now_local.elapsed().as_secs());
+    //         }
+    //     }))
+    // }
+    // for handle in handles {
+    //     handle.join().unwrap();
+    // }
+    // println!("Tree building took {} seconds", now.elapsed().as_secs());
 
-    print!("{tree:#?}");
-
-    // Goal is to take all sequence and find all top ten 5-mers
-    // Use those 5-mers to come up with a minimal perfect hash
-    // Upper bound for number of total top 10 5-mers: 10 * 10619
-
+    // print!("{tree:#?}");
 
     
 }
