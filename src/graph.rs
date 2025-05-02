@@ -5,20 +5,54 @@ use std::fmt;
 use std::rc::Rc;
 use std::thread::spawn;
 use std::sync::{Arc, mpsc, Weak};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::atomic::Ordering::{Acquire, AcqRel};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+use std::sync::atomic::Ordering::{Acquire, AcqRel, SeqCst};
 
 type ArcGraph = Arc<Graph>;
+type ArcU64 = Arc<AtomicU64>;
 type ArcVec<T> = Arc<Vec<T>>;
 type ArcProtein = Arc<Protein>;
 type ArcBool = Arc<AtomicBool>;
 type ArcUsize = Arc<AtomicUsize>;
 type ArcKmerEdge = Arc<KmerEdge>;
 type ArcProteinVertex = Arc<ProteinVertex>;
+type ArcKmerEdgeHelper = Arc<KmerEdgeHelper>;
 
 type WeakGraph = Weak<Graph>;
 
 type OptionArcUsize = Rc<Option<ArcUsize>>;
+
+struct KmerEdgeHelper {
+    // thread that gets to switch this to false will be allowed to write to KmerEdge
+    update_helper: ArcBool,
+
+    // const-sized array containing vertex keys to add to KmerEdge
+    array: [ArcUsize; 1000],
+
+    //  1 + 21 + 21 + 21
+    //  zero_one switch ->  if zero, will look through first 21
+    //                      if one, will look through second 21
+    //  third 21 ->         if zero, helper will increment by one while looking through array until it reaches num in first 21
+    //                      if one, helper will increment by one while looking through array until it reaches num in second 21
+    //  second 21 ->        if zero, threads will increment by one and retrieve previous; if third 21 <= second 21, wait
+    //  first 21 ->         if one, threads will increment by one and retrieve previous; if third 21 <= first 21, wait
+    filled_indices_tracker: ArcU64,
+}
+
+impl KmerEdgeHelper {
+    fn new() -> KmerEdgeHelper {
+        KmerEdgeHelper { 
+            update_helper: Arc::new(AtomicBool::new(false)), 
+            array: [0usize; 1000].map(|x| Arc::new(AtomicUsize::new(x))),
+            filled_indices_tracker: Arc::new(AtomicU64::new(0u64)),
+        }
+    }
+
+    fn can_update_kmer_edge(&self) -> bool {
+        self.update_helper.swap(false, AcqRel)
+    }
+}
+
 
 pub struct KmerEdgeSingle {
     kmer: usize,
@@ -35,6 +69,11 @@ impl KmerEdgeSingle {
             vertices_bit_array: vec![false; vertices_count]
                 .iter().map(|b| Arc::new(AtomicBool::new(*b))).collect(),
         }
+    }
+
+    // Change kmer info
+    fn update_kmer(&mut self, kmer:usize) {
+        self.kmer = kmer;
     }
 
     // Add key to ProteinVertex
@@ -169,6 +208,13 @@ impl KmerEdge {
         }
     }
 
+    fn update_kmer(&mut self, kmer: usize) {
+        match self {
+            Self::Single(val) => val.update_kmer(kmer),
+            Self::Group(_) => panic!("Shouldn't be able to call update_kmer"),
+        }
+    }
+
     fn update_protein_vertices(&self,
             new_key: ArcUsize, thread_count: u32) {
         match self {
@@ -258,11 +304,13 @@ impl ProteinVertex {
         for key in &self.edges_key {
             let loaded_key = key.load(Acquire);
 
+            let curr_edge: &mut ArcKmerEdge = 
+                &mut graph_strong.edges[loaded_key].clone();
 
             // Two threads may try to access the same edge -> how do we deal with this?
-            let edge: &mut KmerEdge = unsafe { 
-                &mut *graph_strong.edges[loaded_key]};
-            edge.add_vertex(self.key);
+            let curr_edge_raw: &mut KmerEdge = unsafe {
+                Arc::get_mut_unchecked(curr_edge)};
+            curr_edge_raw.add_vertex(self.key);
         }
 
         // Remove temporary strong pointer
@@ -284,6 +332,7 @@ pub struct Graph {
     protein_list: ArcVec<ArcProtein>,
     vertices: ArcVec<ArcProteinVertex>,
     global_edge_keys: ArcVec<ArcUsize>,
+    edge_update_helpers : ArcVec<ArcKmerEdgeHelper>,
 }
 impl Graph {
 
@@ -295,23 +344,101 @@ impl Graph {
         let global_edge_keys: ArcVec<ArcUsize> = Arc::new((0..kmer_count).into_iter()
             .map(|k: usize| Arc::new(AtomicUsize::new(k))).collect());
         let vertices_count: usize = protein_list.len();
+
+        // Create empty edges
+        let edges: ArcVec<ArcKmerEdge> = Arc::new(Vec::new());
+        let edges_index: ArcUsize = Arc::new(AtomicUsize::new(0usize));
+
+        let arc_kmer_count: ArcUsize = Arc::new(AtomicUsize::new(kmer_count));
+        let arc_vertices_count: ArcUsize = Arc::new(AtomicUsize::new(vertices_count));
+
+        let mut handles  = vec![];
+        for _ in 0..thread_count {
+            let mut edges: ArcVec<ArcKmerEdge> = edges.clone();
+            let edges_index: ArcUsize = edges_index.clone();
+            let arc_kmer_count: ArcUsize = arc_kmer_count.clone();
+            let arc_vertices_count: ArcUsize = arc_vertices_count.clone();
+            handles.push(spawn(move || {
+                loop {
+                    let curr_edge_index = edges_index.load(Acquire);
+                    let kmer_count = arc_kmer_count.load(Acquire);
+                    if curr_edge_index >= kmer_count {
+                        break;
+                    }
+                    let mut curr_edge: ArcKmerEdge = Arc::new(KmerEdge::new(
+                        0, arc_vertices_count.load(Acquire)));
+                    let curr_edge_index: Result<usize, usize> = edges_index
+                        .fetch_update(SeqCst, SeqCst, |x| {
+                            if x >= kmer_count {
+                                None
+                            }
+                            else {
+                                // Part of atomic operation, so we are safe
+                                unsafe { Arc::get_mut_unchecked(&mut edges)
+                                    .push(curr_edge.clone()); }
+                                Some(x+1)
+                            }
+                        });
+                    if curr_edge_index.is_err() {
+                        break;
+                    }
+                    // Only current thread will access this edge, so we are safe
+                    unsafe { Arc::get_mut_unchecked(&mut curr_edge)
+                        .update_kmer(curr_edge_index.unwrap());
+                    }
+                }
+                
+            }));
+        }
+
+        // Create edge update helpers
+        let edge_update_helpers: ArcVec<ArcKmerEdgeHelper> = Arc::new(Vec::new());
+        let edge_helpers_index: ArcUsize = Arc::new(AtomicUsize::new(0usize));
+        
+        let arc_kmer_count: ArcUsize = Arc::new(AtomicUsize::new(kmer_count));
+
+        let mut handles  = vec![];
+        for _ in 0..thread_count {
+            let mut edge_helpers: ArcVec<ArcKmerEdgeHelper> = edge_update_helpers.clone();
+            let edge_helpers_index: ArcUsize = edge_helpers_index.clone();
+            let arc_kmer_count: ArcUsize = arc_kmer_count.clone();
+            handles.push(spawn(move || {
+                loop {
+                    let curr_helper_index = edge_helpers_index.load(Acquire);
+                    let kmer_count = arc_kmer_count.load(Acquire);
+                    if curr_helper_index >= kmer_count {
+                        break;
+                    }
+                    let curr_helper: ArcKmerEdgeHelper = Arc::new(KmerEdgeHelper::new());
+                    let curr_helper_index: Result<usize, usize> = edges_index
+                        .fetch_update(SeqCst, SeqCst, |x| {
+                            if x >= kmer_count {
+                                None
+                            }
+                            else {
+                                // Part of atomic operation, so we are safe
+                                unsafe { Arc::get_mut_unchecked(&mut edge_helpers)
+                                    .push(curr_helper.clone()); }
+                                Some(x+1)
+                            }
+                        });
+                    if curr_helper_index.is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+
         let graph: Graph = Graph {
             vertices: Arc::new(Vec::new()),
-            edges: Arc::new(Vec::new()),
+            edges,
             protein_list,
             global_edge_keys,
+            edge_update_helpers,
         };
-
-        // Add empty edges
-        let mut graph_arc: ArcGraph = Arc::new(graph);
-        let edges: ArcVec<ArcKmerEdge> = Arc::new(
-            (0..kmer_count).into_iter().map(|kmer: usize| Arc::new(
-                KmerEdge::new(kmer.clone(), vertices_count))
-            ).collect()
-        );
-        // Currently in a single threaded environment, so we are safe
-        unsafe {Arc::get_mut_unchecked(&mut graph_arc).edges = edges};
         
+        let mut graph_arc: ArcGraph = Arc::new(graph);
+
         // Make vertices
         let vertices: ArcVec<ArcProteinVertex> = Arc::new(
             (0..vertices_count).into_iter().map(|k: usize| Arc::new(
