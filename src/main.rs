@@ -47,6 +47,7 @@ fn merge_sort(list: &mut Vec<(u32, u32)>, start: usize, end: usize, item: u32) {
 }
 
 fn main() {
+    eprintln!("We start main");
     env::set_var("RUST_BACKTRACE", "1");
     // Arguments required: input, threads
     let args: Vec<String> = env::args().collect();
@@ -68,6 +69,8 @@ fn main() {
         }, |_record, _found|{
             Some(())
         }).unwrap();
+
+    eprintln!("We created Protein structs");
 
     // Each protein should now have a list of random 5-mers and 7-mers
     let five_mer_freq_list: Arc<Mutex<Vec<(FiveMer, u32)>>> = Arc::new(
@@ -141,6 +144,8 @@ fn main() {
         handle.join().unwrap();
     }
 
+    eprintln!("We combined k-mers");
+
     // Now we can remove unique kmers and develop the minimal perfect hash functions
     let mut five_mer_unique = vec![];
     let mut five_mer_repeat = vec![];
@@ -189,6 +194,8 @@ fn main() {
     }
     drop(seven_mer_repeat);
     drop(seven_mer_freq_list);
+
+    eprintln!("We found unique k-mers");
     
 
     let mut handles = vec![];
@@ -249,6 +256,8 @@ fn main() {
     drop(five_mer_all_phf);
     drop(seven_mer_all_phf);
 
+    eprintln!("We made unique hash");
+
     let five_mer_hash_freq = Arc::into_inner(five_mer_hash_freq).unwrap().into_inner().unwrap();
     let protein_list: Arc<Vec<Arc<Protein>>> = Arc::new({
         let mut temp_list = vec![];
@@ -259,7 +268,10 @@ fn main() {
             temp_list.push(Arc::new(protein.into_inner().unwrap()));
         }
         temp_list});
-    let graph = Graph::new(five_mer_hash_freq.len(), threads, protein_list.clone());
+
+    eprintln!("We can make a graph");
+    let graph = Graph::new(
+        five_mer_hash_freq.len(), threads as usize, protein_list.clone());
     let mut prev_edge_amt = five_mer_hash_freq.len();
     Graph::combine_edges(graph.clone(), threads);
     let mut new_edge_amt  = graph.edges.len();
