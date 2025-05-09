@@ -1,5 +1,6 @@
 #![feature(get_mut_unchecked)]
 
+use std::sync::atomic::Ordering::Acquire;
 use seq_io::parallel::parallel_fasta;
 use std::sync::{Arc, Mutex, RwLock};
 use seq_io::fasta::Reader;
@@ -270,18 +271,21 @@ fn main() {
         temp_list});
 
     eprintln!("We can make a graph");
-    let graph = Graph::new(
+    let graph_arc = Graph::new(
         five_mer_hash_freq.len(), threads as usize, protein_list.clone());
+    let mut graph_ref = unsafe {&*graph_arc.load(Acquire)};
     let mut prev_edge_amt = five_mer_hash_freq.len();
-    Graph::combine_edges(graph.clone(), threads);
-    let mut new_edge_amt  = graph.edges.len();
+    graph_ref.combine_edges(Arc::downgrade(&graph_arc), threads);
+    graph_ref = unsafe {&*graph_arc.load(Acquire)};
+    let mut new_edge_amt  = graph_ref.edges.len();
     while prev_edge_amt != new_edge_amt {
-        Graph::combine_edges(graph.clone(), threads);
+        graph_ref.combine_edges(Arc::downgrade(&graph_arc), threads);
+        graph_ref = unsafe {&*graph_arc.load(Acquire)};
         prev_edge_amt = new_edge_amt.clone();
-        new_edge_amt = graph.edges.len();
+        new_edge_amt = graph_ref.edges.len();
     }
     
-    println!("Graph after a few iterations:\n{graph:#?}");
+    println!("Graph after a few iterations:\n{graph_ref:#?}");
 
     
     // std::process::exit(0);

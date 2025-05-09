@@ -7,9 +7,8 @@
 #SBATCH --qos=highmem
 #SBATCH --nodes=1
 #SBATCH --ntasks=16
-#SBATCH --nodelist=cbcb16
 #SBATCH --mem=512gb
 #SBATCH --partition=cbcb
 #SBATCH --account=cbcb
 
-cargo run -- uniprot_arg.fasta 16
+cargo run --release -- uniprot_arg.fasta 16

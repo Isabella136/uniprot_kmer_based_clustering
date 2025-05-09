@@ -7,21 +7,25 @@ use crate::graph::edge::KmerEdgeHelper;
 use crate::graph::vertex::ProteinVertex;
 
 use std::fmt;
+use std::ptr;
 use std::rc::Rc;
+use std::boxed::Box;
 use std::thread::spawn;
+use std::time::Instant;
 use std::sync::{Arc, mpsc, Weak};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize};
 use std::sync::atomic::Ordering::{Acquire, AcqRel, Release};
 
-type ArcGraph = Arc<Graph>;
 type ArcVec<T> = Arc<Vec<T>>;
 type ArcProtein = Arc<Protein>;
 type ArcUsize = Arc<AtomicUsize>;
-type ArcKmerEdge = Arc<KmerEdge>;
-type ArcProteinVertex = Arc<ProteinVertex>;
-type ArcKmerEdgeHelper = Arc<KmerEdgeHelper>;
+type ArcGraph = Arc<AtomicPtr<Graph>>;
+type ArcKmerEdge = Arc<AtomicPtr<KmerEdge>>;
+type ArcProteinVertex = Arc<AtomicPtr<ProteinVertex>>;
+type ArcKmerEdgeHelper = Arc<AtomicPtr<KmerEdgeHelper>>;
 
 type WeakUsize = Weak<AtomicUsize>;
+type WeakGraph = Weak<AtomicPtr<Graph>>;
 
 type OptionWeakUsize = Rc<Option<WeakUsize>>;
 
@@ -30,222 +34,137 @@ pub struct Graph {
     protein_list: ArcVec<ArcProtein>,
     vertices: ArcVec<ArcProteinVertex>,
     global_edge_keys: ArcVec<ArcUsize>,
-    edge_update_helpers : ArcVec<ArcKmerEdgeHelper>,
+    helpers : ArcVec<ArcKmerEdgeHelper>,
 }
 impl Graph {
     // Create a graph and return an ARC pointer to said graph
     pub fn new(kmer_count: usize, thread_count: usize, 
             protein_list: ArcVec<ArcProtein>) -> ArcGraph {
 
-        eprintln!("We made it to new");
-
         // Create Graph object skeleton
-        let global_edge_keys: ArcVec<ArcUsize> = Arc::new((0..kmer_count).into_iter()
-            .map(|k: usize| Arc::new(AtomicUsize::new(k))).collect());
-        let mut edge_update_helpers: ArcVec<ArcKmerEdgeHelper> = Arc::new(
-            Vec::with_capacity(kmer_count));
-        let mut vertices: ArcVec<ArcProteinVertex> = Arc::new(
-            Vec::with_capacity(protein_list.len()));
-        let mut edges: ArcVec<ArcKmerEdge> = Arc::new(
-            Vec::with_capacity(kmer_count));
+        let now = Instant::now();
+        let global_edge_keys: ArcVec<ArcUsize> = Arc::new((0..kmer_count)
+            .into_iter().map(|k: usize| Arc::new(AtomicUsize::new(k)))
+            .collect());
+        let elapsed = now.elapsed().as_nanos();
+        eprintln!("global_edge_keys vector construction time: {} nanosecs", 
+            elapsed);
+        
+        let helpers: ArcVec<ArcKmerEdgeHelper> = Arc::new((0..kmer_count)
+            .into_iter().map(|_| Arc::new(AtomicPtr::new(ptr::null_mut())))
+            .collect());
+
+        let vertices: ArcVec<ArcProteinVertex> = Arc::new((0..protein_list.len())
+            .into_iter().map(|_| Arc::new(AtomicPtr::new(ptr::null_mut())))
+            .collect());
+
+        let edges: ArcVec<ArcKmerEdge> = Arc::new((0..kmer_count)
+            .into_iter().map(|_| Arc::new(AtomicPtr::new(ptr::null_mut())))
+            .collect());
+
+        eprintln!("Empty vectors created");
 
         // Make ARC pointers of shared variables 
         let arc_kmer_count: ArcUsize = Arc::new(AtomicUsize::new(kmer_count));
         let arc_protein_count: ArcUsize = Arc::new(AtomicUsize::new(protein_list.len()));
 
-        // Concurrently make new KmerEdge structs
-        let total_edges: ArcUsize = Arc::new(AtomicUsize::new(0usize));
-        let (send, recv) = mpsc::channel::<
-            (ArcUsize, ArcVec<ArcKmerEdge>)>();
+        // Concurrently make new KmerEdge and KmerEdgeHelper structs
+        let now = Instant::now();
+        let edge_index: ArcUsize = Arc::new(AtomicUsize::new(0usize));
         let mut handles  = vec![];
         for _ in 0..thread_count {
-            let total_edges: ArcUsize = total_edges.clone();
+            let edge_index: ArcUsize = edge_index.clone();
+            let edges: ArcVec<ArcKmerEdge> = edges.clone();
             let arc_kmer_count: ArcUsize = arc_kmer_count.clone();
+            let helpers: ArcVec<ArcKmerEdgeHelper> = helpers.clone();
             let arc_protein_count: ArcUsize = arc_protein_count.clone();
-            let prefix_length: ArcUsize = Arc::new(AtomicUsize::new(0));
-            let send: mpsc::Sender<(ArcUsize, ArcVec<ArcKmerEdge>)> = send.clone();
-            let mut split_edges: ArcVec<ArcKmerEdge> = 
-                Arc::new(Vec::with_capacity(kmer_count/(thread_count/2)));
             handles.push(spawn(move || {
+                let vertices_count = arc_protein_count.load(Acquire);
+                let kmer_count = arc_kmer_count.load(Acquire);
                 loop {
 
                     // If we already have enough edges, break
-                    let curr_edge_count = total_edges.fetch_add(1, AcqRel);
-                    let kmer_count = arc_kmer_count.load(Acquire);
-                    if curr_edge_count >= kmer_count {
-                        let _ = send.send((prefix_length, split_edges));
+                    let curr_index = edge_index.fetch_add(1, AcqRel);
+                    if curr_index >= kmer_count {
                         break;
                     }
 
-                    // Create new edge
-                    let curr_edge: ArcKmerEdge = Arc::new(KmerEdge::new(
-                        prefix_length.clone(), split_edges.len(),
-                        arc_protein_count.load(Acquire)));   
+                    // Get atomic ptrs to edge and helper
+                    let a_ptr_edge: ArcKmerEdge = edges[curr_index].clone();
+                    let a_ptr_helper: ArcKmerEdgeHelper = helpers[curr_index].clone();
 
-                    Arc::get_mut(&mut split_edges).unwrap().push(curr_edge.clone());
+                    // Create new KmerEdge and KmerEdgeHelper structs
+                    let curr_edge: KmerEdge = KmerEdge::new(
+                        curr_index, vertices_count);
+                    let curr_helper: KmerEdgeHelper = KmerEdgeHelper::new();
+
+                    // Get raw ptrs to new KmerEdge and KmerEdgeHelper structs
+                    let ptr_edge = Box::into_raw(Box::new(curr_edge));
+                    let ptr_helper = Box::into_raw(Box::new(curr_helper));
+
+                    // Store raw ptrs into atomic ptrs
+                    a_ptr_edge.store(ptr_edge, Release);
+                    a_ptr_helper.store(ptr_helper, Release);
                 }
                 
             }));
         }
 
-        drop(send);
-
         // Wait for threads to end
         for handle in handles {
             handle.join().unwrap();
         }
-
-        // Aggregrate KmerEdge structs into one vector
-        for _ in 0..thread_count {
-            let (prefix_length, mut split_edges) = recv.recv().unwrap();
-            prefix_length.store(edges.len(), Release);
-            Arc::get_mut(&mut edges).unwrap().append(
-                Arc::get_mut(&mut split_edges).unwrap());
-        }
         
-        drop(recv);
-        eprintln!("We created KmerEdge structs");
-
-        // Concurrently make new KmerEdge update helpers
-        let total_edge_helpers: ArcUsize = Arc::new(AtomicUsize::new(0usize));
-        let (send, recv) = mpsc::channel::<ArcVec<ArcKmerEdgeHelper>>();
-        let mut handles  = vec![];
-        for _ in 0..thread_count {
-            let mut split_helpers: ArcVec<ArcKmerEdgeHelper> = 
-                Arc::new(Vec::with_capacity(kmer_count/(thread_count/2)));
-            let send: mpsc::Sender<ArcVec<ArcKmerEdgeHelper>> = send.clone();
-            let total_edge_helpers: ArcUsize = total_edge_helpers.clone();
-            let arc_kmer_count: ArcUsize = arc_kmer_count.clone();
-            handles.push(spawn(move || {
-                loop {
-
-                    // If we already have enough helpers, break
-                    let curr_helper_count = total_edge_helpers.fetch_add(1, AcqRel);
-                    let kmer_count = arc_kmer_count.load(Acquire);
-                    if curr_helper_count >= kmer_count {
-                        let _ = send.send(split_helpers);
-                        break;
-                    }
-                    // Create new helper
-                    let curr_helper: ArcKmerEdgeHelper = Arc::new(KmerEdgeHelper::new());
-
-                    Arc::get_mut(&mut split_helpers).unwrap().push(curr_helper.clone());
-                }
-            }));
-        }
-
-        drop(send);
-
-        // Wait for threads to end
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        // Aggregrate KmerEdgeHelper structs into one vector
-        for _ in 0..thread_count {
-            let mut split_helpers: ArcVec<ArcKmerEdgeHelper> = recv.recv().unwrap();
-
-            // We are in single-threaded environment, so we are safe
-            Arc::get_mut(&mut edge_update_helpers).unwrap().append(
-                Arc::get_mut(&mut split_helpers).unwrap());
-        }
-        
-        drop(recv);
-        eprintln!("We created KmerEdgeHelper structs");
+        let elapsed = now.elapsed().as_nanos();
+        eprintln!("edges vector construction time: {} nanosecs", 
+            elapsed);
 
         // Construct graph
         let graph: Graph = Graph {
-            vertices: vertices.clone(),
+            vertices,
             edges,
             protein_list,
             global_edge_keys,
-            edge_update_helpers,
+            helpers,
         };
 
-        eprintln!("Graph is made");
-        
-        let graph_arc: ArcGraph = Arc::new(graph);
+        let graph_ptr: *mut Graph = Box::into_raw(Box::new(graph));
+        let graph_arc: ArcGraph = Arc::new(AtomicPtr::new(graph_ptr));
 
-        // Concurrently make new ProteinVertex structs
-        let (send, recv) = mpsc::channel::<ArcVec<ArcProteinVertex>>();
-        let total_vertices: ArcUsize = Arc::new(AtomicUsize::new(0usize));
-        let mut handles  = vec![];
-        for _ in 0..thread_count {
-            let mut split_vertices: ArcVec<ArcProteinVertex> = 
-                Arc::new(Vec::with_capacity(arc_protein_count.load(Acquire)));
-            let send: mpsc::Sender<ArcVec<ArcProteinVertex>> = send.clone();
-            let arc_protein_count: ArcUsize = arc_protein_count.clone();
-            let total_vertices: ArcUsize = total_vertices.clone();
-            let graph_arc: ArcGraph = graph_arc.clone();
-            handles.push(spawn(move || {
-                loop {
+        let graph: &Graph = unsafe{& *graph_arc.load(Acquire)};
 
-                    // If we already have enough vertices, break
-                    let curr_vertex_count = total_vertices.fetch_add(1, AcqRel);
-                    let protein_count: usize = arc_protein_count.load(Acquire);
-                    if curr_vertex_count >= protein_count {
-                        let _ = send.send(split_vertices);
-                        break;
-                    }
-
-                    // Create new vertex
-                    let curr_vertex: ArcProteinVertex = Arc::new(ProteinVertex::new(
-                        Arc::downgrade(&graph_arc)));
-
-                    // One thread per vector, so we are safe
-                    Arc::get_mut(&mut split_vertices).unwrap().push(curr_vertex);
-                }
-            }));
-        }
-
-        drop(send);
-
-        // Wait for threads to end
-        for handle in handles {
-            handle.join().unwrap();
-        }
-
-        // Aggregrate ProteinVertex structs into one vector
-        for _ in 0..thread_count {
-            let mut split_vertices: ArcVec<ArcProteinVertex> = recv.recv().unwrap();
-
-            // We are in single-threaded environment, so we are safe
-            unsafe {Arc::get_mut_unchecked(&mut vertices).append(
-                Arc::get_mut(&mut split_vertices).unwrap())};
-        }
-
-        drop(recv);
-        eprintln!("We created empty ProteinVertex structs");
-
-        // Concurrently update ProteinVertex and KmerEdge structs
+        // Concurrently make new ProteinVertex structs and update KmerEdge structs
+        let now = Instant::now();
         let vertex_index: ArcUsize = Arc::new(AtomicUsize::new(0usize));
         let mut handles  = vec![];
         for _ in 0..thread_count {
+            let vertices: ArcVec<ArcProteinVertex> = graph.vertices.clone();
             let arc_protein_count: ArcUsize = arc_protein_count.clone();
-            let vertices: ArcVec<ArcProteinVertex> = vertices.clone();
             let vertex_index: ArcUsize = vertex_index.clone();
+            let graph_arc: ArcGraph = graph_arc.clone();
             handles.push(spawn(move || {
+                let protein_count: usize = arc_protein_count.load(Acquire);
                 loop {
 
                     // If we already have enough vertices, break
-                    let curr_vertex_index = vertex_index.fetch_add(1, AcqRel);
-                    let protein_count: usize = arc_protein_count.load(Acquire);
-                    if curr_vertex_index >= protein_count {
+                    let curr_index = vertex_index.fetch_add(1, AcqRel);
+                    if curr_index >= protein_count {
                         break;
                     }
 
-                    // Get current vertex
-                    let mut curr_vertex: Arc<ProteinVertex> = vertices[curr_vertex_index].clone();
+                    // Get atomic ptrs to vertex
+                    let a_ptr_vertex: ArcProteinVertex = vertices[curr_index].clone();
 
-                    // Update key info in new vertex to be equal to its index in vector
-                    // Only current thread will access this vertex, so we are safe
-                    unsafe { Arc::get_mut_unchecked(&mut curr_vertex)
-                        .update(curr_vertex_index);
-                    }
-
-                    // Update KmerEdge structs corresponding to edges new vertex is in 
-                    // to reflect vertex's presence
+                    // Create new ProteinVertex
+                    let curr_vertex: ProteinVertex = ProteinVertex::new(
+                        curr_index, Arc::downgrade(&graph_arc));
                     curr_vertex.update_graph_edges();
+
+                    // Get raw ptrs to new KmerEdge and KmerEdgeHelper structs
+                    let ptr_vertex = Box::into_raw(Box::new(curr_vertex));
+
+                    // Store raw ptrs into atomic ptrs
+                    a_ptr_vertex.store(ptr_vertex, Release);
                 }
             }));
         }
@@ -260,52 +179,53 @@ impl Graph {
         let mut handles  = vec![];
         for _ in 0..thread_count {
             let edge_helpers: ArcVec<ArcKmerEdgeHelper> = 
-                graph_arc.edge_update_helpers.clone();
-            let edges: ArcVec<ArcKmerEdge> = graph_arc.edges.clone();
+                graph.helpers.clone();
+            let edges: ArcVec<ArcKmerEdge> = graph.edges.clone();
             let arc_kmer_count: ArcUsize = arc_kmer_count.clone();
             let edge_index: ArcUsize = edge_index.clone();
             
             handles.push(spawn(move || {
+                let kmer_count = arc_kmer_count.load(Acquire);
                 loop {
 
                     // If we have gone through all edges, break
                     let curr_index = edge_index.fetch_add(1, AcqRel);
-                    let kmer_count = arc_kmer_count.load(Acquire);
                     if curr_index >= kmer_count {
                         break;
                     }
 
-                    // Retrieve current helper
-                    let curr_helper: ArcKmerEdgeHelper = edge_helpers[curr_index].clone();
-
-                    // Retrieve current edge
-                    let curr_edge: &mut ArcKmerEdge = &mut edges[curr_index].clone();
+                    // Retrieve current helper and edge
+                    let a_ptr_curr_helper: ArcKmerEdgeHelper = edge_helpers[curr_index].clone();
+                    let a_ptr_curr_edge: ArcKmerEdge = edges[curr_index].clone();
 
                     // Only one thread can access a specific edge at a time, so we are safe
-                    let curr_edge_raw: &mut KmerEdge = unsafe {
-                        Arc::get_mut_unchecked(curr_edge)};
+                    let curr_edge: &mut KmerEdge = unsafe {
+                        &mut *a_ptr_curr_edge.load(Acquire)};
+                    let curr_helper: &KmerEdgeHelper = unsafe {
+                        & *a_ptr_curr_helper.load(Acquire)};
 
-                    curr_helper.update_kmer_edge_final(curr_edge_raw);
+                    curr_helper.update_kmer_edge_final(curr_edge);
                 }
             }));
         }
-
+        
         // Wait for threads to end
         for handle in handles {
             handle.join().unwrap();
         }
+        let elapsed = now.elapsed().as_nanos();
+        eprintln!("vertices vector construction time: {} nanosecs", 
+            elapsed);
 
-        // Currently in a single threaded environment, so we are safe
-        //unsafe {Arc::get_mut_unchecked(&mut graph_arc).vertices = vertices};
         graph_arc
     }
 
     // Combine edges with lots of overlap
-    pub fn combine_edges(mut graph: ArcGraph, thread_count: u32) {
+    pub fn combine_edges(&self, graph_weak: WeakGraph, thread_count: u32) {
         // Get current keys to edges
-        let mut unordered_edge_keys: Vec<OptionWeakUsize> = (0..graph.edges.len())
+        let mut unordered_edge_keys: Vec<OptionWeakUsize> = (0..self.edges.len())
             .into_iter().map(|i| Rc::new(Some(Arc::downgrade(
-            &graph.global_edge_keys[i])))).collect();
+            &self.global_edge_keys[i])))).collect();
 
         // Make a second vector of current keys, ordered by edge size
         let mut ordered_edge_keys: Vec<OptionWeakUsize> = unordered_edge_keys.clone();
@@ -314,11 +234,14 @@ impl Graph {
             let cloned_b: Option<WeakUsize> = b.as_ref().clone();
             let key_a: usize = cloned_a.unwrap().upgrade().unwrap().load(Acquire);
             let key_b: usize = cloned_b.unwrap().upgrade().unwrap().load(Acquire);
-            let edge_a: ArcKmerEdge = graph.edges[key_a].clone();
-            let edge_b: ArcKmerEdge = graph.edges[key_b].clone();
+            let edge_a_ptr: ArcKmerEdge = self.edges[key_a].clone();
+            let edge_b_ptr: ArcKmerEdge = self.edges[key_b].clone();
+            let edge_a: &KmerEdge = unsafe {& *edge_a_ptr.load(Acquire)};
+            let edge_b: &KmerEdge = unsafe {& *edge_b_ptr.load(Acquire)};
             let edge_a_size: usize = edge_a.get_vertices_key().len();
             let edge_b_size: usize = edge_b.get_vertices_key().len();
             edge_b_size.cmp(&edge_a_size)});
+
         
         // Traverse through each edge
         for edge_key in ordered_edge_keys {
@@ -327,21 +250,30 @@ impl Graph {
                 continue;
             }
 
+            let now = Instant::now();
+
             // Get actual pointer to KmerEdge
             let unwraped_edge_key: WeakUsize = edge_key.as_ref().clone().unwrap();
             let loaded_edge_key: usize = unwraped_edge_key.upgrade().unwrap().load(Acquire);
-            let edge: ArcKmerEdge = graph.edges[loaded_edge_key].clone();
-            eprintln!("Currently at edge {loaded_edge_key} of size {}", 
-                edge.get_vertices_key().len());
+            let edge_ptr: ArcKmerEdge = self.edges[loaded_edge_key].clone();
+
+            // No one is updating edge, so we are safe
+            let edge = unsafe {& *edge_ptr.load(Acquire)};
 
             // Make ARC pointers of shared variables   
             let vertices_index: ArcUsize = 
                 Arc::new(AtomicUsize::new(1));
             let vertices_keys: ArcVec<usize> = 
                 Arc::new(edge.get_vertices_key());
-            let first_vertex: ArcProteinVertex = graph.vertices[vertices_keys[0]].clone();
+            let first_vertex_ptr: ArcProteinVertex = 
+                self.vertices[vertices_keys[0]].clone();
+
+            // No one is updating vertex, so we are safe
+            let first_vertex: &ProteinVertex = unsafe {
+                & *first_vertex_ptr.load(Acquire)};
+
             let other_edges_bitarray: ArcVec<AtomicBool> = 
-                Arc::new(first_vertex.get_edges_bit_array(graph.edges.len())
+                Arc::new(first_vertex.get_edges_bit_array(self.edges.len())
                     .iter().map(|b: &bool| AtomicBool::new(*b)).collect());
             let mut other_edges_keys: Vec<WeakUsize> = 
                 first_vertex.get_edges_key().clone();
@@ -352,13 +284,12 @@ impl Graph {
 
             // Retrieve other edges that share a vertex with current edge
             for _ in 0..thread_count {
-                let graph: ArcGraph = graph.clone();
-                let send: mpsc::Sender<ArcVec<WeakUsize>> = send.clone();
                 let vertices_index: ArcUsize = vertices_index.clone();
                 let vertices_keys: ArcVec<usize> = vertices_keys.clone();
+                let send: mpsc::Sender<ArcVec<WeakUsize>> = send.clone();
+                let vertices: ArcVec<ArcProteinVertex> = self.vertices.clone();
                 let mut other_edges_keys_split: ArcVec<WeakUsize> = Arc::new(vec![]);
                 let other_edges_bitarray: ArcVec<AtomicBool> = other_edges_bitarray.clone();
-                
                 handles.push(spawn(move || {
                     loop {
                         let curr_vertices_index = vertices_index.fetch_add(
@@ -370,11 +301,15 @@ impl Graph {
                         }
 
                         let curr_vertex_key = vertices_keys[curr_vertices_index];
-                        let curr_vertex: &ArcProteinVertex = 
-                            &graph.vertices[curr_vertex_key];
+                        let curr_vertex_ptr: &ArcProteinVertex = 
+                            &vertices[curr_vertex_key];
 
-                        let more_edges_keys: &Vec<WeakUsize> = &curr_vertex.get_edges_key();
+                        // No one is updating vertex, so we are safe
+                        let curr_vertex: &ProteinVertex = unsafe {
+                            & *curr_vertex_ptr.load(Acquire)};
 
+                        let more_edges_keys: &Vec<WeakUsize> = 
+                            &curr_vertex.get_edges_key();
                         for key in more_edges_keys {
                             let loaded_key = key.upgrade().unwrap().load(Acquire);
                             if !other_edges_bitarray[loaded_key].swap(true, AcqRel) {
@@ -402,6 +337,10 @@ impl Graph {
 
             // Gather keys to other edges
             if other_edges_keys.len() == 1 {
+                let elapsed = now.elapsed().as_nanos();
+                eprintln!("edge # {} traversal time: {} nanosecs", 
+                    loaded_edge_key,
+                    elapsed);
                 continue;
             }
 
@@ -421,14 +360,15 @@ impl Graph {
 
             // Find which of the other edges can be merged with current edge
             for _ in 0..thread_count {
-                let graph: ArcGraph = graph.clone();
-                let edge: ArcKmerEdge = edge.clone();
+                let edge_ptr: ArcKmerEdge = edge_ptr.clone();
+                let edges: ArcVec<ArcKmerEdge> = self.edges.clone();
                 let send: mpsc::Sender<ArcVec<WeakUsize>> = send.clone();
                 let other_edges_index: ArcUsize = other_edges_index.clone();
                 let other_edges_keys: ArcVec<WeakUsize> = other_edges_keys.clone();
                 let mut edges_to_merge_with_split: ArcVec<WeakUsize> = Arc::new(vec![]);
-
                 handles.push(spawn(move || {
+                    // No one is updating edge, so we are safe
+                    let edge = unsafe {& *edge_ptr.load(Acquire)};
                     loop {
                         let other_edges_index = other_edges_index.fetch_add(
                             1, AcqRel);
@@ -440,10 +380,13 @@ impl Graph {
                         let other_key: &WeakUsize = &other_edges_keys[other_edges_index];
                         let loaded_other_key: usize = other_key.upgrade()
                             .unwrap().load(Acquire);
-                        let other_edge: &ArcKmerEdge = &graph.edges[loaded_other_key];
+                        let other_edge_ptr: ArcKmerEdge = edges[loaded_other_key].clone();
+                        
+                        // No one is updating other edge, so we are safe
+                        let other_edge = unsafe {& *other_edge_ptr.load(Acquire)};
 
                         let other_cmp_edge: f64 = edge.compare(other_edge);
-                        let edge_cmp_other: f64 = other_edge.compare(&edge);
+                        let edge_cmp_other: f64 = other_edge.compare(edge);
                         if other_cmp_edge == 1.0 {
                             Arc::get_mut(&mut edges_to_merge_with_split)
                                 .unwrap().push(other_key.clone());
@@ -471,20 +414,24 @@ impl Graph {
             drop(other_edges_keys);
             drop(other_edges_index);
             if edges_to_merge_with.len() == 1 {
+                let elapsed = now.elapsed().as_nanos();
+                eprintln!("edge # {} traversal time: {} nanosecs", 
+                    loaded_edge_key,
+                    elapsed);
                 continue;
             }
 
             // Merge edges into one
             let kmer_edge_group: KmerEdge = KmerEdge::merge(
-                &edges_to_merge_with, Arc::downgrade(&graph));
+                &edges_to_merge_with, graph_weak.clone());
             kmer_edge_group.update_protein_vertices(unwraped_edge_key, thread_count);
 
-            // Currently in a single threaded environment, so we are safe
-            unsafe {
-                let graph_mut = Arc::get_mut_unchecked(&mut graph);
-                Arc::get_mut_unchecked(&mut graph_mut.edges)[loaded_edge_key] = 
-                    Arc::new(kmer_edge_group)
-            };
+            // Get raw ptrs to new KmerEdge and KmerEdgeHelper structs
+            let edge_raw: *mut KmerEdge = Box::into_raw(Box::new(kmer_edge_group));
+
+            // Swap and deallocate+delete previous
+            let edge_raw = edge_ptr.swap(edge_raw, AcqRel);
+            drop(unsafe { Box::from_raw(edge_raw) });
             
             for old_key in &*edges_to_merge_with {
                 let loaded = old_key.upgrade().unwrap().load(Acquire);
@@ -494,21 +441,23 @@ impl Graph {
                     }
                 }
             }
+            let elapsed = now.elapsed().as_nanos();
+            eprintln!("edge # {} traversal time: {} nanosecs", 
+                loaded_edge_key,
+                elapsed);
         }
 
         // Remove edges that have been merged with a bigger one
-        let removed_bit_array = Self::remove_edges_marked_for_deletions(
-            graph.clone(), unordered_edge_keys);
+        let mut_self = unsafe {&mut *graph_weak.upgrade().unwrap().load(Acquire)};
+        mut_self.remove_edges_marked_for_deletions(unordered_edge_keys);
 
         // Remove weak pointers to non-existing edges
         let mut handles= vec![];
         let vertices_index: ArcUsize = Arc::new(AtomicUsize::new(0));
-        let removed_bit_array: ArcVec<bool> = Arc::new(removed_bit_array);
 
         for _ in 0..thread_count {
             let vertices_index: ArcUsize = vertices_index.clone();
-            let removed_bit_array: ArcVec<bool> = removed_bit_array.clone();
-            let mut vertices: ArcVec<ArcProteinVertex> = Arc::new((*graph.vertices).clone());
+            let vertices: ArcVec<ArcProteinVertex> = mut_self.vertices.clone();
 
             handles.push(spawn(move || {
                 loop {
@@ -518,12 +467,9 @@ impl Graph {
                     }
 
                     // No two threads will ever traverse the same vertex, so we are safe
-                    unsafe { 
-                        let vertices_mut: &mut Vec<Arc<ProteinVertex>>  = 
-                            Arc::get_mut_unchecked(&mut vertices);
-                        Arc::get_mut_unchecked(&mut vertices_mut[curr_vertices_index])
-                            .remove_edges(removed_bit_array.clone()) 
-                    };
+                    let curr_vertex: &mut ProteinVertex = unsafe {
+                        &mut *vertices[curr_vertices_index].load(Acquire)};
+                    curr_vertex.remove_edges();
                 }
             }))
         }
@@ -534,37 +480,36 @@ impl Graph {
     }
 
     fn remove_edges_marked_for_deletions(
-            mut graph: ArcGraph, unordered_edge_keys: Vec<OptionWeakUsize>) -> Vec<bool>{
-
-        let edge_num = graph.edges.len();
-        let mut removed_bit_array = vec![false; edge_num];
+            &mut self, unordered_edge_keys: Vec<OptionWeakUsize>){
         let mut substractive = 0usize;
         for (index, edge_key) in unordered_edge_keys.iter().enumerate() {
             if edge_key.is_none() {
                 // Currently in a single threaded environment, so we are safe
                 unsafe {
-                    let graph_mut = Arc::get_mut_unchecked(&mut graph);
-                    Arc::get_mut_unchecked(&mut graph_mut.edges)
+                    // must remove and dealloc
+                    let edge = Arc::get_mut_unchecked(&mut self.edges)
                         .remove(index - substractive);
-                    Arc::get_mut_unchecked(&mut graph_mut.global_edge_keys)
+                    let edge_ptr = edge.load(Acquire);
+                    drop(Box::from_raw(edge_ptr));
+                    drop(edge);
+
+                    let helper = Arc::get_mut_unchecked(&mut self.helpers)
                         .remove(index - substractive);
+                    let helper_ptr = helper.load(Acquire);
+                    drop(Box::from_raw(helper_ptr));
+                    drop(helper);
+
+                    let key = Arc::get_mut_unchecked(&mut self.global_edge_keys)
+                        .remove(index - substractive);
+                    drop(key);
                 }
                 substractive += 1;
-                removed_bit_array[index] = true;
             }
             else if substractive > 0 {
-                // Currently in a single threaded environment, so we are safe
-                unsafe {
-                    let graph_mut = Arc::get_mut_unchecked(&mut graph);
-                    let edge_keys = 
-                        Arc::get_mut_unchecked(&mut graph_mut.global_edge_keys);
-                    let edge_key = 
-                        Arc::get_mut_unchecked(&mut edge_keys[index-substractive]);
-                    edge_key.fetch_sub(substractive, AcqRel);
-                }
+                self.global_edge_keys[index-substractive]
+                    .fetch_sub(substractive, AcqRel);
             }
         }
-        removed_bit_array
     }
 
     // Remove edges without diverging AMR labels
@@ -575,8 +520,6 @@ impl Graph {
     //         .collect();
     // }
 }
-
-
 
 impl fmt::Debug for Graph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
