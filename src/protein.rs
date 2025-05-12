@@ -130,6 +130,11 @@ impl Protein {
             hashmap_seven_mers,
         }
     }
+
+    pub fn get_amr_class(&self) -> &str {
+        let protein_attr: Vec<&str> = self.id.split_terminator('|').collect();
+        protein_attr[3]
+    }
     pub fn get_five_mers(&self) -> Vec<FiveMer> {
         return self.five_mers.clone();
     }

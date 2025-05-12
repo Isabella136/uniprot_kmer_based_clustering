@@ -274,18 +274,12 @@ fn main() {
     let graph_arc = Graph::new(
         five_mer_hash_freq.len(), threads as usize, protein_list.clone());
     let mut graph_ref = unsafe {&*graph_arc.load(Acquire)};
-    let mut prev_edge_amt = five_mer_hash_freq.len();
     graph_ref.combine_edges(Arc::downgrade(&graph_arc), threads);
     graph_ref = unsafe {&*graph_arc.load(Acquire)};
-    let mut new_edge_amt  = graph_ref.edges.len();
-    while prev_edge_amt != new_edge_amt {
-        graph_ref.combine_edges(Arc::downgrade(&graph_arc), threads);
-        graph_ref = unsafe {&*graph_arc.load(Acquire)};
-        prev_edge_amt = new_edge_amt.clone();
-        new_edge_amt = graph_ref.edges.len();
-    }
-    
-    println!("Graph after a few iterations:\n{graph_ref:#?}");
+    graph_ref.remove_uninteresting_edges(Arc::downgrade(&graph_arc), threads);
+    graph_ref = unsafe {&*graph_arc.load(Acquire)};
+
+    println!("Graph right now:\n{graph_ref:#?}");
 
     
     // std::process::exit(0);

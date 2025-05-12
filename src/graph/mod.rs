@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize};
 use std::sync::atomic::Ordering::{Acquire, AcqRel, Release};
 
 type ArcVec<T> = Arc<Vec<T>>;
+type ArcBool = Arc<AtomicBool>;
 type ArcProtein = Arc<Protein>;
 type ArcUsize = Arc<AtomicUsize>;
 type ArcGraph = Arc<AtomicPtr<Graph>>;
@@ -241,7 +242,6 @@ impl Graph {
             let edge_a_size: usize = edge_a.get_vertices_key().len();
             let edge_b_size: usize = edge_b.get_vertices_key().len();
             edge_b_size.cmp(&edge_a_size)});
-
         
         // Traverse through each edge
         for edge_key in ordered_edge_keys {
@@ -249,7 +249,6 @@ impl Graph {
             if edge_key.is_none() {
                 continue;
             }
-
             let now = Instant::now();
 
             // Get actual pointer to KmerEdge
@@ -386,15 +385,15 @@ impl Graph {
                         let other_edge = unsafe {& *other_edge_ptr.load(Acquire)};
 
                         let other_cmp_edge: f64 = edge.compare(other_edge);
-                        let edge_cmp_other: f64 = other_edge.compare(edge);
+                        // let edge_cmp_other: f64 = other_edge.compare(edge);
                         if other_cmp_edge == 1.0 {
                             Arc::get_mut(&mut edges_to_merge_with_split)
                                 .unwrap().push(other_key.clone());
                         }
-                        else if edge_cmp_other >= 0.8 && other_cmp_edge >= 0.8 {
-                            Arc::get_mut(&mut edges_to_merge_with_split)
-                                .unwrap().push(other_key.clone());
-                        }
+                        // else if edge_cmp_other >= 0.8 && other_cmp_edge >= 0.8 {
+                        //     Arc::get_mut(&mut edges_to_merge_with_split)
+                        //         .unwrap().push(other_key.clone());
+                        // }
                     }
                 }))
             }
@@ -449,7 +448,11 @@ impl Graph {
 
         // Remove edges that have been merged with a bigger one
         let mut_self = unsafe {&mut *graph_weak.upgrade().unwrap().load(Acquire)};
-        mut_self.remove_edges_marked_for_deletions(unordered_edge_keys);
+        let mut substractive = 0usize;
+        for (index, edge_key) in unordered_edge_keys.iter().enumerate() {
+            mut_self.remove_edges_marked_for_deletions(
+                edge_key.is_none(), &index, &mut substractive);
+        }
 
         // Remove weak pointers to non-existing edges
         let mut handles= vec![];
@@ -479,46 +482,126 @@ impl Graph {
         }
     }
 
-    fn remove_edges_marked_for_deletions(
-            &mut self, unordered_edge_keys: Vec<OptionWeakUsize>){
-        let mut substractive = 0usize;
-        for (index, edge_key) in unordered_edge_keys.iter().enumerate() {
-            if edge_key.is_none() {
-                // Currently in a single threaded environment, so we are safe
-                unsafe {
-                    // must remove and dealloc
-                    let edge = Arc::get_mut_unchecked(&mut self.edges)
-                        .remove(index - substractive);
-                    let edge_ptr = edge.load(Acquire);
-                    drop(Box::from_raw(edge_ptr));
-                    drop(edge);
+    fn remove_edges_marked_for_deletions(&mut self, 
+            remove_key: bool, index: &usize, substractive: &mut usize){
+        if remove_key {
+            // Currently in a single threaded environment, so we are safe
+            unsafe {
+                // must remove and dealloc
+                let edge = Arc::get_mut_unchecked(&mut self.edges)
+                    .remove(index - *substractive);
+                let edge_ptr = edge.load(Acquire);
+                drop(Box::from_raw(edge_ptr));
+                drop(edge);
 
-                    let helper = Arc::get_mut_unchecked(&mut self.helpers)
-                        .remove(index - substractive);
-                    let helper_ptr = helper.load(Acquire);
-                    drop(Box::from_raw(helper_ptr));
-                    drop(helper);
+                let helper = Arc::get_mut_unchecked(&mut self.helpers)
+                    .remove(index - *substractive);
+                let helper_ptr = helper.load(Acquire);
+                drop(Box::from_raw(helper_ptr));
+                drop(helper);
 
-                    let key = Arc::get_mut_unchecked(&mut self.global_edge_keys)
-                        .remove(index - substractive);
-                    drop(key);
-                }
-                substractive += 1;
+                let key = Arc::get_mut_unchecked(&mut self.global_edge_keys)
+                    .remove(index - *substractive);
+                drop(key);
             }
-            else if substractive > 0 {
-                self.global_edge_keys[index-substractive]
-                    .fetch_sub(substractive, AcqRel);
-            }
+            *substractive += 1;
+        }
+        else if *substractive > 0 {
+            self.global_edge_keys[index - *substractive]
+                .fetch_sub(*substractive, AcqRel);
         }
     }
 
     // Remove edges without diverging AMR labels
-    // pub fn remove_uninteresting_edges(mut graph: ArcGraph, thread_count: u32) {
-    //     // Get current keys to edges
-    //     let mut unordered_edge_keys: Vec<OptionArcUsize> = (0..graph.edges.len())
-    //         .into_iter().map(|i| Rc::new(Some(graph.global_edge_keys[i].clone())))
-    //         .collect();
-    // }
+    pub fn remove_uninteresting_edges(&self, graph_weak: WeakGraph, thread_count: u32) {
+        // Get current keys to edges
+        let bitarray_keys_vec: ArcVec<ArcBool> = Arc::new((0..self.edges.len())
+            .into_iter().map(|_| Arc::new(AtomicBool::new(true))).collect());
+
+        // Make ARC pointers of shared variables
+        let bitarray_vec_index: ArcUsize = Arc::new(AtomicUsize::new(0));
+        let mut handles= vec![];
+
+        // Find edges that only represent one amr class
+        for _ in 0..thread_count {
+            let bitarray_keys_vec: ArcVec<ArcBool> = bitarray_keys_vec.clone();
+            let proteins: ArcVec<ArcProtein> = self.protein_list.clone();
+            let bitarray_vec_index: ArcUsize = bitarray_vec_index.clone();
+            let edges: ArcVec<ArcKmerEdge> = self.edges.clone();
+            handles.push(spawn(move || {
+                let edge_count = edges.len();
+                loop {
+                    let curr_index = bitarray_vec_index.fetch_add(1, AcqRel);
+                    if curr_index >= edge_count {
+                        break;
+                    }
+                    
+                    // No two threads will ever traverse the same edge, so we are safe
+                    let edge_ptr: ArcKmerEdge = edges[curr_index].clone();
+                    let edge_ref: &KmerEdge = unsafe {& *edge_ptr.load(Acquire)};
+                    let vertices_key: Vec<usize> = edge_ref.get_vertices_key();
+
+                    let mut at_least_two_classes: bool = false;
+                    let first_amr_class: &str = proteins[vertices_key[0]].get_amr_class();
+
+                    // Traverse through vertices in edge to see 
+                    // if edge represents at least two amr classes
+                    for vertex_key in &vertices_key[1..] {
+                        if *first_amr_class == *proteins[*vertex_key].get_amr_class() {
+                            at_least_two_classes = true;
+                            break;
+                        }
+                    }
+
+                    // Set bit to 0 so we know to remove edge later on
+                    if !at_least_two_classes {
+                        bitarray_keys_vec[curr_index].store(false, Release);
+                    }
+
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Remove edges that represent only one amr class
+        let mut_self = unsafe {&mut *graph_weak.upgrade().unwrap().load(Acquire)};
+        let mut substractive = 0usize;
+        for (index, edge_key) in bitarray_keys_vec.iter().enumerate() {
+            mut_self.remove_edges_marked_for_deletions(
+                edge_key.load(Acquire), &index, &mut substractive);
+        }
+
+        // Remove weak pointers to non-existing edges
+        let mut handles= vec![];
+        let vertices_index: ArcUsize = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..thread_count {
+            let vertices_index: ArcUsize = vertices_index.clone();
+            let vertices: ArcVec<ArcProteinVertex> = mut_self.vertices.clone();
+
+            handles.push(spawn(move || {
+                loop {
+                    let curr_vertices_index = vertices_index.fetch_add(1, AcqRel);
+                    if curr_vertices_index >= 10619 {
+                        break;
+                    }
+
+                    // No two threads will ever traverse the same vertex, so we are safe
+                    let curr_vertex: &mut ProteinVertex = unsafe {
+                        &mut *vertices[curr_vertices_index].load(Acquire)};
+                    curr_vertex.remove_edges();
+                }
+            }))
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        
+    }
 }
 
 impl fmt::Debug for Graph {
