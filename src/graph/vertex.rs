@@ -1,6 +1,6 @@
 use crate::Graph;
 use crate::graph::edge::KmerEdge;
-use crate::graph::edge::KmerEdgeHelper;
+// use crate::graph::edge::KmerEdgeHelper;
 
 use std::fmt;
 use std::sync::{Arc, Weak};
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize};
 
 // type ArcUsize = Arc<AtomicUsize>;
 type ArcKmerEdge = Arc<AtomicPtr<KmerEdge>>;
-type ArcKmerEdgeHelper = Arc<AtomicPtr<KmerEdgeHelper>>;
+// type ArcKmerEdgeHelper = Arc<AtomicPtr<KmerEdgeHelper>>;
 
 type WeakUsize = Weak<AtomicUsize>;
 type WeakGraph = Weak<AtomicPtr<Graph>>;
@@ -75,22 +75,13 @@ impl ProteinVertex {
             let loaded_key = key.upgrade().unwrap().load(Acquire);
             let aptr_curr_edge: ArcKmerEdge = 
                 graph_ref.edges[loaded_key].clone();
-            let aptr_curr_helper: ArcKmerEdgeHelper =
-                graph_ref.helpers[loaded_key].clone();
 
-            // We won't update kmer edge helper, so we are safe
-            let curr_helper: &KmerEdgeHelper = unsafe {
-                &*aptr_curr_helper.load(Acquire)};
+            // We won't update kmer edge, so we are safe
+            let curr_edge: &KmerEdge = unsafe {
+                &*aptr_curr_edge.load(Acquire)};
 
-            if curr_helper.can_update_kmer_edge() {
-                // Only one thread can access a specific edge at a time, so we are safe
-                let curr_edge: &mut KmerEdge = unsafe {
-                    &mut *aptr_curr_edge.load(Acquire)};
-                curr_helper.update_kmer_edge(self.key.clone(), curr_edge);
-            }
-            else {
-                curr_helper.add_to_array(self.key.clone());
-            }
+            curr_edge.add_vertex(self.key);
+            
         }
     }
 

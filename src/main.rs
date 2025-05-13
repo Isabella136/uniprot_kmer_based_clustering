@@ -243,7 +243,9 @@ fn main() {
                 curr_protein.modify_hash_seven_mer(
                     seven_mer_repeat_len.deref(), &seven_mer_repeat_phf);
 
-                let five_mers: Vec<u32> = curr_protein.get_five_mers();
+                let mut five_mers: Vec<u32> = curr_protein.get_five_mers();
+                five_mers.sort();
+                five_mers.dedup();
                 let mut five_mer_hash_freq = five_mer_hash_freq.lock().unwrap();
                 for five_mer in five_mers {
                     (*five_mer_hash_freq)[five_mer_repeat_phf.hash(&five_mer) as usize] += 1;
@@ -272,7 +274,7 @@ fn main() {
 
     eprintln!("We can make a graph");
     let graph_arc = Graph::new(
-        five_mer_hash_freq.len(), threads as usize, protein_list.clone());
+        five_mer_hash_freq, threads as usize, protein_list.clone());
     let mut graph_ref = unsafe {&*graph_arc.load(Acquire)};
     graph_ref.combine_edges(Arc::downgrade(&graph_arc), threads);
     graph_ref = unsafe {&*graph_arc.load(Acquire)};

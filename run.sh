@@ -1,8 +1,8 @@
 #!/bin/bash
 
-#SBATCH --job-name=uniprot_nearest_neighbor
-#SBATCH --output=log/uniprot_nearest_neighbor.out%j
-#SBATCH --error=log/uniprot_nearest_neighbor.err%j
+#SBATCH --job-name=uniprot_clustering
+#SBATCH --output=log/uniprot_clustering.out%j
+#SBATCH --error=log/uniprot_clustering.err%j
 #SBATCH --time=12:00:00
 #SBATCH --qos=highmem
 #SBATCH --nodes=1
