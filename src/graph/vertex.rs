@@ -4,10 +4,10 @@ use crate::graph::edge::KmerEdge;
 
 use std::fmt;
 use std::sync::{Arc, Weak};
-use std::sync::atomic::Ordering::Acquire;
 use std::sync::atomic::{AtomicPtr, AtomicUsize};
+use std::sync::atomic::Ordering::{Acquire, AcqRel};
 
-// type ArcUsize = Arc<AtomicUsize>;
+type ArcUsize = Arc<AtomicUsize>;
 type ArcKmerEdge = Arc<AtomicPtr<KmerEdge>>;
 // type ArcKmerEdgeHelper = Arc<AtomicPtr<KmerEdgeHelper>>;
 
@@ -24,10 +24,7 @@ impl ProteinVertex {
     // Make a new ProteinVertex
     pub fn new(key: usize, graph: WeakGraph) -> ProteinVertex {
         // Pointer is valid, so we are safe
-        let graph_ref: &Graph = unsafe {&*graph.upgrade().unwrap().load(Acquire)};
-        let edges_key = graph_ref.protein_list[key].clone().get_five_hash().iter()
-            .map(|k: &u32| Arc::downgrade(&graph_ref.global_edge_keys[*k as usize]))
-            .collect();
+        let edges_key = vec![];
 
         ProteinVertex{
             key, 
@@ -42,46 +39,115 @@ impl ProteinVertex {
     }
 
     // Add key to KmerEdge
-    pub fn add_edge(&mut self, edge_key: WeakUsize) {
-        // Pointer is valid, so we are safe
+    // pub fn add_edge(&mut self, edge_key: WeakUsize) {
+    //     // Pointer is valid, so we are safe
+    //     let graph_ref: &Graph = unsafe {&*self.graph.upgrade().unwrap().load(Acquire)};
+
+    //     let length = graph_ref.edges.len();
+    //     let edges_bit_array: Vec<bool> = self.get_edges_bit_array(length);
+    //     if !edges_bit_array[edge_key.upgrade().unwrap().load(Acquire)] {
+    //         self.edges_key.push(edge_key);
+    //     }
+    // }
+
+    pub fn keep_specified_edges(&mut self, specified_edge_keys: Arc<Vec<ArcUsize>>) {
         let graph_ref: &Graph = unsafe {&*self.graph.upgrade().unwrap().load(Acquire)};
 
         let length = graph_ref.edges.len();
-        let edges_bit_array: Vec<bool> = self.get_edges_bit_array(length);
-        if !edges_bit_array[edge_key.upgrade().unwrap().load(Acquire)] {
-            self.edges_key.push(edge_key);
-        }
-    }
+        let old_edges_bit_array: Vec<bool> = self.get_edges_bit_array(length);
+        let mut new_edges_key_vec: Vec<WeakUsize> = vec![];
 
-    // Remove keys to KmerEdge
-    pub fn remove_edges(&mut self) {
-        let mut index = 0usize;
-        while index < self.edges_key.len() {
-            if self.edges_key[index].strong_count() == 0 {
-                self.edges_key.remove(index);
-            }
-            else {
-                index += 1;
+        for index in 0..specified_edge_keys.len() {
+            let key = specified_edge_keys[index].load(Acquire);
+            if old_edges_bit_array[key] {
+                new_edges_key_vec.push(Arc::downgrade(&specified_edge_keys[index]));
             }
         }
+
+        self.edges_key = new_edges_key_vec;
     }
 
     // Update ProteinVertex's edges to reflect ProteinVertex's presence
-    pub fn update_graph_edges(&self) {
+    pub fn update_graph_edges(&mut self, edge_count_prefix_sum: Arc<Vec<usize>>, 
+            times_kmer_visited: Arc<Vec<ArcUsize>>, kmer_freq: Arc<Vec<usize>>) {
         // Pointer is valid, so we are safe
         let graph_ref: &Graph = unsafe {&*self.graph.upgrade().unwrap().load(Acquire)};
-
-        for key in &self.edges_key {
-            let loaded_key = key.upgrade().unwrap().load(Acquire);
-            let aptr_curr_edge: ArcKmerEdge = 
-                graph_ref.edges[loaded_key].clone();
-
-            // We won't update kmer edge, so we are safe
-            let curr_edge: &KmerEdge = unsafe {
-                &*aptr_curr_edge.load(Acquire)};
-
-            curr_edge.add_vertex(self.key);
+        
+        fn update_edge_info<'a>(vertex: &'a mut ProteinVertex, graph_ref: &'a Graph, edge_index: usize, kmer: &'a usize) -> Result<&'a str, &'a str>{
+            let edge_ptr: ArcKmerEdge = graph_ref.edges[edge_index].clone();
             
+            // add vertex's key to edge
+            // we are not modifying ptr, so we are safe
+            let edge: &KmerEdge = unsafe {& *edge_ptr.load(Acquire)};
+            if !edge.get_kmers().contains(kmer) {
+                return Result::Err("Math error yet again")
+            }
+
+            let res = edge.add_vertex(vertex.key);
+            
+            // add edge's key to vertex
+            vertex.edges_key.push(Arc::downgrade(&graph_ref.global_edge_keys[edge_index]));
+
+            res
+        }
+
+        let mut kmers: Vec<usize> = graph_ref.protein_list[self.key].clone().get_five_hash()
+            .iter().map(|x| *x as usize).collect();
+        kmers.sort();
+        kmers.dedup();        
+        
+        // for each kmer:
+            // number of batches = kmer_freq[kmer] - 1
+            // length of batch i = kmer_freq[kmer] - 1 - i
+        for kmer in kmers {
+            // calculate the left-most edge assigned to the current kmer
+            let left_edge = match kmer {
+                0 => 0,
+                _ => edge_count_prefix_sum[kmer - 1]
+            };
+            
+            // gets the number of times the kmer was already "visited"
+            // equal to the index of the batch that is now assigned to the current vertex
+            // also equal to the number of already-assigned batches we need to go through
+            let visited = times_kmer_visited[kmer].fetch_add(1, AcqRel);
+            
+            // for each batch
+            for batch in 0..visited+1 {
+                // offset corresponds to the total amount of edges in previous batches 
+                let offset = match batch {
+                    0 => 0,
+                    _ => (0..batch).map(|x| kmer_freq[kmer] - 1 - x).sum()
+                };
+                // if current batch is the one assigned to current vertex
+                // add vertex to all edges in current batch
+                if batch == visited {
+                    for j in 0..kmer_freq[kmer] - 1 - batch {
+                        let edge_index = left_edge + offset + j;
+                        let res = update_edge_info(self, graph_ref, edge_index, &kmer);
+                        if res.is_err() {
+                            let edge = unsafe {& *graph_ref.edges[edge_index].clone().load(Acquire)};
+                            panic!("I did my math wrong again\n\tvertex: {},\tkmer: {},\tvisited: {},\tkmer_freq: {},\tedge: {},\tedge_kmer: {:?},\tprevious vertices: {:?}",
+                                self.key, kmer, visited, kmer_freq[kmer], edge_index, 
+                                edge.get_kmers(), edge.get_vertices_key());
+                        }
+                    }
+                }
+                // else, add vertex to only one edge in current batch
+                else {
+                    // sub_offset corresponds to total number of edges in current batches
+                    // that already have two vertices
+                    let sub_offset =  visited - 1 - batch;
+                    let edge_index = left_edge + offset + sub_offset;
+                    let res = update_edge_info(self, graph_ref, edge_index, &kmer);
+                    if res.is_err() {
+                        let edge = unsafe {& *graph_ref.edges[edge_index].clone().load(Acquire)};
+                        panic!("I did my math wrong again\n\tvertex: {},\tkmer: {},\tvisited: {},\tkmer_freq: {},\tedge: {},\tedge_kmer: {:?},\tprevious vertices: {:?}",
+                            self.key, kmer, visited, kmer_freq[kmer], edge_index, 
+                            edge.get_kmers(), edge.get_vertices_key());
+                    }
+                }
+            }
+
         }
     }
 

@@ -275,11 +275,12 @@ fn main() {
     eprintln!("We can make a graph");
     let graph_arc = Graph::new(
         five_mer_hash_freq, threads as usize, protein_list.clone());
-    let mut graph_ref = unsafe {&*graph_arc.load(Acquire)};
+    let mut graph_ref = unsafe {&mut *graph_arc.load(Acquire)};
+    graph_ref.remove_uninteresting_edges(threads);
+    graph_ref = unsafe {&mut *graph_arc.load(Acquire)};
     graph_ref.combine_edges(Arc::downgrade(&graph_arc), threads);
-    graph_ref = unsafe {&*graph_arc.load(Acquire)};
-    graph_ref.remove_uninteresting_edges(Arc::downgrade(&graph_arc), threads);
-    graph_ref = unsafe {&*graph_arc.load(Acquire)};
+    graph_ref = unsafe {&mut *graph_arc.load(Acquire)};
+    
 
     println!("Graph right now:\n{graph_ref:#?}");
 
