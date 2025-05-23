@@ -2,3 +2,6 @@
 features.fasta
 uniprot.fasta
 log
+db_files
+fasta_files
+blastp_output.tsv

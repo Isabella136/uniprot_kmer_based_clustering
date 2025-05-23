@@ -1,6 +1,5 @@
 use crate::Graph;
 use crate::graph::edge::KmerEdge;
-// use crate::graph::edge::KmerEdgeHelper;
 
 use std::fmt;
 use std::sync::{Arc, Weak};
@@ -9,7 +8,6 @@ use std::sync::atomic::Ordering::{Acquire, AcqRel};
 
 type ArcUsize = Arc<AtomicUsize>;
 type ArcKmerEdge = Arc<AtomicPtr<KmerEdge>>;
-// type ArcKmerEdgeHelper = Arc<AtomicPtr<KmerEdgeHelper>>;
 
 type WeakUsize = Weak<AtomicUsize>;
 type WeakGraph = Weak<AtomicPtr<Graph>>;
@@ -38,19 +36,9 @@ impl ProteinVertex {
         &self.edges_key
     }
 
-    // Add key to KmerEdge
-    // pub fn add_edge(&mut self, edge_key: WeakUsize) {
-    //     // Pointer is valid, so we are safe
-    //     let graph_ref: &Graph = unsafe {&*self.graph.upgrade().unwrap().load(Acquire)};
-
-    //     let length = graph_ref.edges.len();
-    //     let edges_bit_array: Vec<bool> = self.get_edges_bit_array(length);
-    //     if !edges_bit_array[edge_key.upgrade().unwrap().load(Acquire)] {
-    //         self.edges_key.push(edge_key);
-    //     }
-    // }
-
+    // Only keep edges if they are included in function parameter
     pub fn keep_specified_edges(&mut self, specified_edge_keys: Arc<Vec<ArcUsize>>) {
+        // Pointer is valid, so we are safe
         let graph_ref: &Graph = unsafe {&*self.graph.upgrade().unwrap().load(Acquire)};
 
         let length = graph_ref.edges.len();
@@ -158,6 +146,13 @@ impl ProteinVertex {
             edges_bit_array[key.upgrade().unwrap().load(Acquire)] = true;
         }
         edges_bit_array
+    }
+
+    // Get id and sequence from original protein struct
+    pub fn get_protein_id_and_seq(&self) -> (&String, &String) {
+        // Pointer is valid, so we are safe
+        let graph_ref: &Graph = unsafe {&*self.graph.upgrade().unwrap().load(Acquire)};
+        return graph_ref.protein_list[self.key].get_id_and_seq()
     }
 }
 

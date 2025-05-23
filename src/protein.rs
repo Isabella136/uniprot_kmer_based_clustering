@@ -1,11 +1,10 @@
 use seq_io::fasta::{Record, RefRecord};
-// use rand::seq::index::sample;
+use rand::seq::index::sample;
 use boomphf::*;
 use std::fmt;
 
 type BitwiseAminoAcid = u8;
 type FiveMer = u32;
-type SevenMer = u32;
 
 const AMINO_ACID_LIST: [char; 21] = [
     'C', 'S', 'T', 'A', 'G',
@@ -47,16 +46,6 @@ fn five_mer_back_to_amino_acid(five_mer: FiveMer) -> String {
     }
     amino_acids
 }
-fn create_seven_mer(amino_acids: [BitwiseAminoAcid; 7]) -> SevenMer {
-    let powers_of_twenty_one = [
-        1, 21, 21*21, bitwise_power(21, 3), bitwise_power(21, 4),
-        bitwise_power(21, 5), bitwise_power(21, 6)];
-    let mut seven_mer: u32= 0u32;
-    for i in 0..7 {
-        seven_mer += Into::<u32>::into(amino_acids[i]) * powers_of_twenty_one[6-i];
-    }
-    seven_mer
-}
 fn amino_acid_to_bits(amino_acid: &char) -> BitwiseAminoAcid {
     let index_usize = AMINO_ACID_LIST.iter().position(|x| x==amino_acid)
         .unwrap_or(20usize);
@@ -69,12 +58,9 @@ fn amino_acid_to_bits(amino_acid: &char) -> BitwiseAminoAcid {
 #[derive(Clone)]
 pub struct Protein {
     id: String,
+    seq: String,
     five_mers: Vec<FiveMer>,
-    seven_mers: Vec<SevenMer>,
     hash_five_mers: Vec<u32>,
-    hash_seven_mers: Vec<u32>,
-    hashmap_five_mers: Vec<bool>,
-    hashmap_seven_mers: Vec<bool>,
 }
 impl fmt::Debug for Protein {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -87,72 +73,81 @@ impl fmt::Debug for Protein {
     }
 }
 impl Protein {
-    pub fn new_protein(record: &RefRecord) -> Protein {
-        // let mut rng = rand::rng();
+    // Make new protein struct, but select a tenth of all 5-mers
+    pub fn new_with_rand_fivemers(record: &RefRecord) -> Protein {
+        // Read from fasta record
         let id = record.id().unwrap().to_string();
-        let seq = record.seq();
+        let seq = str::from_utf8(record.seq()).unwrap().to_string();
+
+        // Randomly select a tenth of all 5-mers
+        let mut rng = rand::rng();
         let seq_len = seq.len();
-        let five_mer_indices: Vec<usize> = (0..seq_len-4).collect();
-        // let five_mer_indices: Vec<usize> = sample(
-        //     &mut rng, seq_len-4, (seq_len-4)/10).into_vec();
-        let seven_mer_indices: Vec<usize> = (0..seq_len-6).collect();
-        // let seven_mer_indices: Vec<usize> = sample(
-        //     &mut rng, seq_len-6, (seq_len-6)/4).into_vec();
+        let five_mer_indices: Vec<usize> = sample(
+            &mut rng, seq_len-4, (seq_len-4)/10).into_vec();
         let five_mers: Vec<FiveMer> = five_mer_indices.iter().map(
             |start| {
                 let end = start + 5;
                 let mut amino_acids = [0u8; 5];
-                for i in *start..end {
-                    amino_acids[i-start] = amino_acid_to_bits(&(seq[i] as char));
-                }
+                for i in *start..end {amino_acids[i-start] = 
+                    amino_acid_to_bits(&(record.seq()[i] as char));}
                 create_five_mer(amino_acids)
             }).collect();
-        let seven_mers: Vec<SevenMer> = seven_mer_indices.iter().map(
-            |start| {
-                let end = start + 7;
-                let mut amino_acids = [0u8; 7];
-                for i in *start..end {
-                    amino_acids[i-start] = amino_acid_to_bits(&(seq[i] as char));
-                }
-                create_seven_mer(amino_acids)
-            }).collect();
+
+        // Empty vector to fill out later
         let hash_five_mers: Vec<u32> = vec![];
-        let hash_seven_mers: Vec<u32> = vec![];
-        let hashmap_five_mers: Vec<bool> = vec![];
-        let hashmap_seven_mers: Vec<bool> = vec![];
         Protein {
             id,
+            seq,
             five_mers,
-            seven_mers,
             hash_five_mers,
-            hash_seven_mers,
-            hashmap_five_mers,
-            hashmap_seven_mers,
         }
     }
 
+    // Make new protein struct
+    pub fn new(record: &RefRecord) -> Protein {
+        // Read from fasta record
+        let id = record.id().unwrap().to_string();
+        let seq = str::from_utf8(record.seq()).unwrap().to_string();
+
+        // Get all 5-mers in protein
+        let seq_len = seq.len();
+        let five_mer_indices: Vec<usize> = (0..seq_len-4).collect();
+        let five_mers: Vec<FiveMer> = five_mer_indices.iter().map(
+            |start| {
+                let end = start + 5;
+                let mut amino_acids = [0u8; 5];
+                for i in *start..end {amino_acids[i-start] = 
+                    amino_acid_to_bits(&(record.seq()[i] as char));}
+                create_five_mer(amino_acids)
+            }).collect();
+
+        // Empty vector to fill out later
+        let hash_five_mers: Vec<u32> = vec![];
+        Protein {
+            id,
+            seq,
+            five_mers,
+            hash_five_mers,
+        }
+    }
+
+    // Get amr class of protein
     pub fn get_amr_class(&self) -> &str {
         let protein_attr: Vec<&str> = self.id.split_terminator('|').collect();
         protein_attr[3]
     }
+
+    // Get 5-mers in protein struct
     pub fn get_five_mers(&self) -> Vec<FiveMer> {
         return self.five_mers.clone();
     }
-    pub fn get_seven_mers(&self) -> Vec<SevenMer> {
-        return self.seven_mers.clone();
-    }
-    // pub fn get_five_hash_map(&self) -> Vec<bool> {
-    //     return self.hashmap_five_mers.clone();
-    // }
+
+    // Get hash keys for the 5-mers in protein struct
     pub fn get_five_hash(&self) -> Vec<u32> {
         return self.hash_five_mers.clone();
     }
-    // pub fn get_seven_hash_map(&self) -> Vec<bool> {
-    //     return self.hashmap_seven_mers.clone();
-    // }
-    // pub fn get_seven_hash(&self) -> Vec<u32> {
-    //     return self.hash_seven_mers.clone();
-    // }
+
+    // Remove 5-mers that only appear in one protein
     pub fn remove_unique_five_mers(&mut self, phf: &Mphf<u32>, unique_kmers: &Vec<bool>) {
         let mut index = 0usize;
         while index < self.five_mers.len() {
@@ -165,34 +160,21 @@ impl Protein {
             index += 1;
         }
     }
-    pub fn remove_unique_seven_mers(&mut self, phf: &Mphf<u32>, unique_kmers: &Vec<bool>) {
-        let mut index = 0usize;
-        while index < self.seven_mers.len() {
-            while unique_kmers[phf.hash(&self.seven_mers[index]) as usize] {
-                self.seven_mers.remove(index);
-                if index == self.seven_mers.len() {
-                    break;
-                }
-            }
-            index += 1;
-        }
-    }
+
+    // Populate hash keys vector
     pub fn modify_hash_five_mer(&mut self, len: &usize, phf: &Mphf<u32>) {
         let mut hash_map = vec![false; *len];
         for five_mer in &self.five_mers {
             let curr_hash = phf.hash(five_mer) as usize;
-            hash_map[curr_hash] = true;
-            self.hash_five_mers.push(curr_hash as u32);
+            if !hash_map[curr_hash] {
+                hash_map[curr_hash] = true;
+                self.hash_five_mers.push(curr_hash as u32);
+            }
         }
-        self.hashmap_five_mers = hash_map;
     }
-    pub fn modify_hash_seven_mer(&mut self, len: &usize, phf: &Mphf<u32>) {
-        let mut hash_map = vec![false; *len];
-        for seven_mer in &self.seven_mers {
-            let curr_hash = phf.hash(seven_mer) as usize;
-            hash_map[curr_hash] = true;
-            self.hash_seven_mers.push(curr_hash as u32);
-        }
-        self.hashmap_seven_mers = hash_map;
+
+    // Get protein id and sequence
+    pub fn get_id_and_seq(&self) -> (&String, &String) {
+        return (&self.id, &self.seq);
     }
 }

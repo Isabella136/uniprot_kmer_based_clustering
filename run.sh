@@ -11,4 +11,7 @@
 #SBATCH --partition=cbcb
 #SBATCH --account=cbcb
 
+eval "$(conda shell.bash hook)"
+conda activate diamond_for_uniprot
+
 cargo run --release -- uniprot_arg.fasta 32

@@ -1,4 +1,5 @@
 use crate::Graph;
+use crate::graph::vertex::ProteinVertex;
 
 use std::fmt;
 use std::sync::{Arc, Weak};
@@ -6,6 +7,7 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize};
 use std::sync::atomic::Ordering::{Acquire, AcqRel, Release};
 
 type ArcUsize = Arc<AtomicUsize>;
+type ArcProteinVertex = Arc<AtomicPtr<ProteinVertex>>;
 
 type WeakUsize = Weak<AtomicUsize>;
 type WeakGraph = Weak<AtomicPtr<Graph>>;
@@ -39,18 +41,6 @@ impl KmerEdgeSingle {
         else {
             return Result::Err("I did my math wrong again")
         }
-        Result::Ok("Yeah")
-    }
-
-    fn double_checking(&self) -> Result<&str, &str> {
-        if self.times_visited.load(Acquire) != 2 {
-            return Result::Err("Oops!")
-        }
-
-        if self.vertices_key[0].load(Acquire) == self.vertices_key[1].load(Acquire) {
-            return Result::Err("Oops!")
-        }
-        
         Result::Ok("Yeah")
     }
 }
@@ -94,6 +84,31 @@ impl KmerEdgeGroup {
         KmerEdgeGroup {kmers, graph, vertices_key}
     }
 
+    fn get_proteins_ids_and_sequences(&self) -> [(&String, &String); 2] {
+        // Pointer is valid, so we are safe
+        let graph_ref: &Graph = unsafe {&*self.graph.upgrade().unwrap().load(Acquire)};
+
+        // Get start protein reference
+        let start_protein_key: usize = 
+            self.vertices_key[0].load(Acquire);
+        let start_protein_ptr: ArcProteinVertex = 
+            graph_ref.vertices[start_protein_key].clone();
+        let start_protein_ref: &ProteinVertex = 
+            unsafe {&*start_protein_ptr.load(Acquire)};
+        
+        
+        // Get end protein reference
+        let end_protein_key: usize = 
+            self.vertices_key[1].load(Acquire);
+        let end_protein_ptr: ArcProteinVertex = 
+            graph_ref.vertices[end_protein_key].clone();
+        let end_protein_ref: &ProteinVertex = 
+            unsafe {&*end_protein_ptr.load(Acquire)};
+
+        return [start_protein_ref.get_protein_id_and_seq(), 
+            end_protein_ref.get_protein_id_and_seq()]
+    }
+
 }
 
 pub enum KmerEdge {
@@ -131,9 +146,9 @@ impl KmerEdge {
         Self::Group(KmerEdgeGroup::new(kmer_edge_keys, graph))
     }
 
-    pub fn double_checking(&self) -> Result<&str, &str>{
+    pub fn get_proteins_ids_and_sequences(&self) -> [(&String, &String); 2]{
         match self {
-            Self::Single(val) => val.double_checking(),
+            Self::Group(val) => val.get_proteins_ids_and_sequences(),
             _ => panic!("How?!")
         }
     }

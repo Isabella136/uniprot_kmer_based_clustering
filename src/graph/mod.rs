@@ -6,10 +6,13 @@ use crate::graph::edge::KmerEdge;
 use crate::graph::vertex::ProteinVertex;
 
 use std::fmt;
+use std::io::Write;
 use std::ptr;
+use std::fs::File;
 use std::boxed::Box;
 use std::thread::spawn;
 use std::time::Instant;
+use std::process::Command;
 use std::sync::{Arc, mpsc, Weak};
 use std::sync::atomic::Ordering::{Acquire, AcqRel, Release};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, AtomicU64};
@@ -44,12 +47,15 @@ impl Graph {
             .map(|i| edges_per_kmer[0..i+1].iter().sum()).collect());
         let edge_count = edge_count_prefix_sum.last().unwrap();
 
+        eprintln!("Number of 5mers found in at least two proteins: {}", kmer_count);
+        eprintln!("Number of total edges: {}", edge_count);
+
         // Create Graph object skeleton
         let now = Instant::now();
         let global_edge_keys: ArcVec<ArcUsize> = Arc::new((0..*edge_count)
             .map(|k: usize| Arc::new(AtomicUsize::new(k))).collect());
-        let elapsed = now.elapsed().as_nanos();
-        eprintln!("global_edge_keys vector construction time: {} nanosecs", 
+        let elapsed = now.elapsed().as_secs_f64();
+        eprintln!("global_edge_keys vector construction time: {} seconds", 
             elapsed);
         
         let vertices: ArcVec<ArcProteinVertex> = Arc::new((0..protein_list.len())
@@ -89,11 +95,10 @@ impl Graph {
 
                     // Find the actual current kmer
                     let mut curr_kmer = (curr_kmer_edge_index >> 32) as usize;
-                    if edge_count_prefix_sum[curr_kmer] == curr_edge_index {
-                        kmer_edge_indices.fetch_add(1 << 32, AcqRel);
-                        curr_kmer += 1;
-                    }
                     while edge_count_prefix_sum[curr_kmer] <= curr_edge_index {
+                        if edge_count_prefix_sum[curr_kmer] == curr_edge_index {
+                            kmer_edge_indices.fetch_add(1 << 32, AcqRel);
+                        }
                         curr_kmer += 1;
                     }
 
@@ -118,8 +123,8 @@ impl Graph {
             handle.join().unwrap();
         }
         
-        let elapsed = now.elapsed().as_nanos();
-        eprintln!("edges vector construction time: {} nanosecs", 
+        let elapsed = now.elapsed().as_secs_f64();
+        eprintln!("edges vector construction time: {} seconds", 
             elapsed);
 
         // Construct graph
@@ -152,7 +157,6 @@ impl Graph {
             handles.push(spawn(move || {
                 let protein_count: usize = arc_protein_count.load(Acquire);
                 loop {
-                    // let thread_now: Instant = Instant::now();
                     // If we already have enough vertices, break
                     let curr_protein = vertex_index.fetch_add(1, AcqRel);
                     if curr_protein >= protein_count {
@@ -173,10 +177,6 @@ impl Graph {
 
                     // Store raw ptrs into atomic ptrs
                     a_ptr_vertex.store(ptr_vertex, Release);
-
-                    // let elapsed = thread_now.elapsed().as_nanos();
-                    // eprintln!("protein {} construction time: {} nanosecs", 
-                    //     curr_protein, elapsed);
                 }
             }));
         }
@@ -185,54 +185,145 @@ impl Graph {
         for handle in handles {
             handle.join().unwrap();
         }
-        let elapsed = now.elapsed().as_nanos();
-        eprintln!("vertices vector construction time: {} nanosecs", 
+        let elapsed = now.elapsed().as_secs_f64();
+        eprintln!("vertices vector construction time: {} seconds", 
             elapsed);
-
-        let edge_indices: ArcUsize = Arc::new(AtomicUsize::new(0));
-        let mut handles  = vec![];
-        for _ in 0..thread_count {
-            let edge_indices: ArcUsize = edge_indices.clone();
-            let edges: ArcVec<ArcKmerEdge> = graph.edges.clone();
-            let arc_edge_count: ArcUsize = arc_edge_count.clone();
-            handles.push(spawn(move || {
-                let edge_count = arc_edge_count.load(Acquire);
-                loop {
-                    // If we already have enough edges, break
-                    let curr_edge_index = edge_indices.fetch_add(1, AcqRel);
-                    if curr_edge_index >= edge_count {
-                        break;
-                    }
-
-                    // No two threads will ever visit the same edge, so we are safe
-                    let a_ptr_edge: ArcKmerEdge = edges[curr_edge_index].clone();
-                    let ptr_edge: &KmerEdge = unsafe {& *a_ptr_edge.load(Acquire)};
-
-                    // Check edge
-                    let res = ptr_edge.double_checking();
-
-                    if res.is_err() {
-                        panic!("Oops!\n\tkmer: {:?},\tedge: {},\tvertices: {:?}",
-                            ptr_edge.get_kmers(), curr_edge_index, ptr_edge.get_vertices_key());
-                    }
-                }
-                
-            }));
-        }
-
-        // Wait for threads to end
-        for handle in handles {
-            handle.join().unwrap();
-        }
 
         graph_arc
     }
 
-    // Combine edges with same two vertices
-    pub fn combine_edges(&mut self, graph_weak: WeakGraph, thread_count: u32) {
+    pub fn align_and_output_pairs(&self, thread_count: u32) {
         // Make ARC pointers of shared variables
         let edge_index: ArcUsize = Arc::new(AtomicUsize::new(0));
+
+        let (send, recv) = mpsc::channel::<Vec<u8>>();
+        let mut handles  = vec![]; 
+
+        Command::new("rm")
+            .arg("-r").arg("fasta_files")
+            .output()
+            .expect("Failed to remove directory");
+
+        Command::new("rm")
+            .arg("-r").arg("db_files")
+            .output()
+            .expect("Failed to remove directory");
+
+        Command::new("mkdir")
+            .arg("fasta_files")
+            .output()
+            .expect("Failed to make directory");
+
+        Command::new("mkdir")
+            .arg("db_files")
+            .output()
+            .expect("Failed to make directory");
+
+        for _ in 0..thread_count {
+            let edge_index: ArcUsize = edge_index.clone();
+            let send: mpsc::Sender<Vec<u8>> = send.clone();
+            let edges: ArcVec<ArcKmerEdge> = self.edges.clone();
+            handles.push(spawn(move || {
+                let edge_count: usize = edges.len();
+                let mut blast_output: Vec<u8> = vec![];
+                loop {
+                    // If we already traversed through all edges, break
+                    let edge_key = edge_index.fetch_add(1, AcqRel);
+                    if edge_key >= edge_count {
+                        _ = send.send(blast_output);
+                        break;
+                    }
+
+                    // Get current edge
+                    let edge_ptr: ArcKmerEdge = edges[edge_key].clone();
+                    let edge_ref: &KmerEdge = unsafe {&*edge_ptr.load(Acquire)};
+
+                    // Decide if it is worth running the alignment
+                    if edge_ref.get_kmers().len() <= 10 {
+                        continue;
+                    }
+
+                    // Get id and sequence for both proteins
+                    let proteins: [(&String, &String); 2] =
+                        edge_ref.get_proteins_ids_and_sequences();
+
+                    eprintln!("Cross-checking:\n\treference protein:{}\n\tquery protein:{}\n\tkmers in common:{}", 
+                        &proteins[0].0, &proteins[1].0, edge_ref.get_kmers().len());
+
+                    // Create reference fasta file
+                    let ref_file_name = format!("fasta_files/{}_{}.fasta", 
+                        edge_key, proteins[0].0.split_once('|').unwrap().0);
+                    let mut ref_file = File::create(&ref_file_name)
+                        .expect("Failed to create reference fasta file");
+                    let ref_file_text = format!(">{}\n{}",proteins[0].0, proteins[0].1);
+                    ref_file.write_all(ref_file_text.as_bytes())
+                        .expect("Failed to write to reference fasta file");
+                    drop(ref_file);
+
+                    // Create reference database
+                    let ref_db_name = format!("db_files/{}_{}", 
+                        edge_key, proteins[0].0.split_once('|').unwrap().0);
+                    Command::new("diamond").arg("makedb")
+                        .arg("--in").arg(&ref_file_name)
+                        .arg("--db").arg(&ref_db_name)
+                        .output()
+                        .expect("Couldn't create database");
+
+                    // Create query fasta file
+                    let que_file_name = format!("fasta_files/{}_{}.fasta", 
+                        edge_key, proteins[1].0.split_once('|').unwrap().0);
+                    let mut que_file = File::create(&que_file_name)
+                        .expect("Failed to create query fasta file");
+                    let que_file_text = format!(">{}\n{}",proteins[1].0, proteins[1].1);
+                    que_file.write_all(que_file_text.as_bytes())
+                        .expect("Failed to write to query fasta file");
+                    drop(que_file);
+
+                    // Run blastp
+                    let mut output = Command::new("diamond").arg("blastp")
+                        .arg("--db").arg(&ref_db_name)
+                        .arg("--query").arg(&que_file_name)
+                        .arg("--outfmt").arg("6")
+                            .arg("qseqid").arg("qlen")
+                            .arg("sseqid").arg("slen")
+                            .arg("qstart").arg("qend")
+                            .arg("sstart").arg("send")
+                            .arg("length").arg("pident")
+                            .arg("evalue").arg("bitscore")
+                        .output().expect("Couldn't run the alignment").stdout;
+
+                    blast_output.append(&mut output);
+                }
+            }));
+        }
+        drop(send);
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let header = "query id\tquery length\tsubject id\tsubject length\tquery alignment start\tquery alignment end\tsubject alignment start\tsubject alignment end\talignment length\tpercent identity\tevalue\tbit score\n";
+        let mut blast_output: Vec<u8> = header.as_bytes().to_vec();
+        for _ in 0..thread_count {
+            let mut blast_output_split = recv.recv().unwrap();
+            blast_output.append(&mut blast_output_split);
+        }
+        drop(recv);
+
+        // Write output to file
+        let mut output_file = File::create("blastp_output.tsv")
+            .expect("Failed to create output tsv file");
+        output_file.write_all(blast_output.as_slice())
+            .expect("Failed to write to output tsv file");
+        drop(output_file);
+
+    }
+
+    // Combine edges with same two vertices
+    pub fn combine_edges(&mut self, graph_weak: WeakGraph, thread_count: u32) {
+        eprintln!("Combine edges with the same two vertices");
+        // Make ARC pointers of shared variables
         let now = Instant::now();
+        let edge_index: ArcUsize = Arc::new(AtomicUsize::new(0));
 
         let (send, recv) = mpsc::channel::<(Vec<ArcUsize>, Vec<ArcKmerEdge>)>();
         let mut handles  = vec![]; 
@@ -356,6 +447,10 @@ impl Graph {
 
         drop(send);
 
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
         let mut unique_edges: Vec<ArcKmerEdge> = vec![];
         let mut unique_edge_keys: Vec<ArcUsize> = vec![];
 
@@ -368,10 +463,10 @@ impl Graph {
 
         drop(recv);
 
-        let elapsed = now.elapsed().as_nanos();
-        eprintln!("edge traversal time: {} nanosecs",
+        let elapsed = now.elapsed().as_secs_f64();
+        eprintln!("edge traversal time: {} seconds",
             elapsed);
-
+        let now = Instant::now();
 
         // Remove weak pointers to non-unique edges
         let mut handles= vec![];
@@ -402,8 +497,8 @@ impl Graph {
             handle.join().unwrap();
         }
 
-        let elapsed = now.elapsed().as_nanos();
-        eprintln!("edge removal time: {} nanosecs",
+        let elapsed = now.elapsed().as_secs_f64();
+        eprintln!("edge removal time: {} seconds",
             elapsed);
 
 
@@ -412,9 +507,8 @@ impl Graph {
         self.global_edge_keys = unique_edge_keys;
 
         // Make ARC pointers of shared variables
-        let edge_index: ArcUsize = Arc::new(AtomicUsize::new(0));
-
         let now = Instant::now();
+        let edge_index: ArcUsize = Arc::new(AtomicUsize::new(0));
 
         // Update keys in graph
         let mut handles= vec![];
@@ -444,8 +538,8 @@ impl Graph {
             handle.join().unwrap();
         }
 
-        let elapsed = now.elapsed().as_nanos();
-        eprintln!("key update time: {} nanosecs",
+        let elapsed = now.elapsed().as_secs_f64();
+        eprintln!("key update time: {} seconds",
             elapsed);
 
         eprintln!("Number of edges now: {}", self.edges.len());
@@ -453,10 +547,11 @@ impl Graph {
 
     // Remove edges without diverging AMR labels
     pub fn remove_uninteresting_edges(&mut self, thread_count: u32) {
+        eprintln!("Remove edges without diverging AMR labels");
         // Make ARC pointers of shared variables
-        let edge_index: ArcUsize = Arc::new(AtomicUsize::new(0));
         let now = Instant::now();
-
+        let edge_index: ArcUsize = Arc::new(AtomicUsize::new(0));
+        
         // Only keep edges that represent two amr classes
         let mut handles= vec![];
         let (send, recv) = mpsc::channel::<(Vec<ArcUsize>, Vec<ArcKmerEdge>)>();
@@ -516,12 +611,13 @@ impl Graph {
 
         drop(recv);
 
-        let elapsed = now.elapsed().as_nanos();
-        eprintln!("edge traversal time: {} nanosecs",
+        let elapsed = now.elapsed().as_secs_f64();
+        eprintln!("edge traversal time: {} seconds",
             elapsed);
 
 
         // Remove weak pointers to one-amr edges
+        let now = Instant::now();
         let mut handles= vec![];
         let vertices_index: ArcUsize = Arc::new(AtomicUsize::new(0));
         let two_amr_edge_keys: ArcVec<ArcUsize> = Arc::new(two_amr_edge_keys);
@@ -550,8 +646,8 @@ impl Graph {
             handle.join().unwrap();
         }
 
-        let elapsed = now.elapsed().as_nanos();
-        eprintln!("edge removal time: {} nanosecs",
+        let elapsed = now.elapsed().as_secs_f64();
+        eprintln!("edge removal time: {} seconds",
             elapsed);
 
 
@@ -560,9 +656,9 @@ impl Graph {
         self.global_edge_keys = two_amr_edge_keys;
 
         // Make ARC pointers of shared variables
+        let now = Instant::now();
         let edge_index: ArcUsize = Arc::new(AtomicUsize::new(0));
 
-        let now = Instant::now();
 
         // Update keys in graph
         let mut handles= vec![];
@@ -592,74 +688,13 @@ impl Graph {
             handle.join().unwrap();
         }
 
-        let elapsed = now.elapsed().as_nanos();
-        eprintln!("key update time: {} nanosecs",
+        let elapsed = now.elapsed().as_secs_f64();
+        eprintln!("key update time: {} seconds",
             elapsed);
 
         eprintln!("Number of edges now: {}", self.edges.len());
         
     }
-
-    // pub fn get_divergent_protein_pairs(&self, thread_count: u32) {
-    //     // Get bitarray representing vertex pairs we've already visited
-    //     let vertex_count = self.vertices.len();
-    //     let pair_count = vertex_count*(vertex_count-1)/2;
-
-    //     let bitarray_edge_visited: ArcVec<ArcBool> = Arc::new((0..self.edges.len())
-    //         .into_iter().map(|_| Arc::new(AtomicBool::new(false))).collect());
-    //     // let divergent_pair: ArcVec<ArcKmerEdge> = Arc::new((0..pair_count)
-    //     //     .into_iter().map(|_| Arc::new(AtomicBool::new(false))).collect());
-
-    //     // Make ARC pointers of shared variables
-    //     let edge_index: ArcUsize = Arc::new(AtomicUsize::new(0));
-    //     // let mut handles= vec![];
-
-    //     // Find protein pairs
-    //     for _ in 0..thread_count {
-    //         // let divergent_pair: ArcVec<ArcKmerEdge> = divergent_pair.clone();
-    //         let bitarray_edge_visited: ArcVec<ArcBool> = bitarray_edge_visited.clone();
-    //         let proteins: ArcVec<ArcProtein> = self.protein_list.clone();
-    //         let edges: ArcVec<ArcKmerEdge> = self.edges.clone();
-    //         let edge_index: ArcUsize = edge_index.clone();
-            // handles.push(spawn(move || {
-            //     let edge_count = edges.len();
-            //     loop {
-            //         let curr_index = edge_index.fetch_add(1, AcqRel);
-            //         if curr_index >= edge_count {
-            //             break;
-            //         }
-                    
-            //         // No two threads will ever traverse the same edge, so we are safe
-            //         let edge_ptr: ArcKmerEdge = edges[curr_index].clone();
-            //         let edge_ref: &KmerEdge = unsafe {& *edge_ptr.load(Acquire)};
-            //         let vertices_key: Vec<usize> = edge_ref.get_vertices_key();
-
-            //         let class_separated: [Vec<usize>; 30];
-            //         let first_amr_class: &str = proteins[vertices_key[0]].get_amr_class();
-
-            //         // Traverse through vertices in edge to see 
-            //         // if edge represents at least two amr classes
-            //         for vertex_key in &vertices_key[1..] {
-            //             if *first_amr_class == *proteins[*vertex_key].get_amr_class() {
-            //                 at_least_two_classes = true;
-            //                 break;
-            //             }
-            //         }
-
-            //         // Set bit to 1 so we know to remove edge later on
-            //         if !at_least_two_classes {
-            //             bitarray_keys_vec[curr_index].store(true, Release);
-            //         }
-
-            //     }
-            // }));
-    //     }
-
-    //     // for handle in handles {
-    //     //     handle.join().unwrap();
-    //     // }
-        
-    // }
 }
 
 impl fmt::Debug for Graph {

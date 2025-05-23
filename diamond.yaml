@@ -1,0 +1,5 @@
+name: diamond_for_uniprot
+channels:
+  - bioconda
+dependencies:
+  - diamond
